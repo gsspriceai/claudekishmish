@@ -38,7 +38,7 @@ export interface SupervisedSession {
   ptyOwned: boolean;
   /**
    * Claude Code's own view of the session, from its descriptor: `idle`, `busy`,
-   * `shell`. Only an idle session is a safe thing to nudge.
+   * `shell`. Shown by `ckm status` so the user can see what we see.
    */
   sessionStatus: string | null;
   /**

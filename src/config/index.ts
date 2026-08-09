@@ -27,15 +27,6 @@ export interface Config {
   continuationText: string;
   /** Prompt used when a claim starts a brand-new throwaway session. */
   pingText: string;
-  /**
-   * Text typed into a session that is already open, to claim through it.
-   *
-   * This one lands in a conversation the user cares about and will scroll back
-   * through, so unlike `pingText` it has to explain itself. A bare "ok" sitting
-   * in the middle of yesterday's work, answered by "Hey! What are you working
-   * on?", is confusing noise in someone's real transcript.
-   */
-  nudgeText: string;
   /** Fire this long after the boundary, so we are never a second early. */
   boundaryBufferMs: number;
   /**
@@ -58,7 +49,6 @@ export const DEFAULT_CONFIG: Config = {
   idleClaim: true,
   continuationText: 'continue',
   pingText: 'ok',
-  nudgeText: '[claudekishmish] keeping your 5h usage window open - please reply with just: ok',
   boundaryBufferMs: 20_000,
   resumeDeferGraceMs: 60_000,
   pollIntervalMs: 10_000,
@@ -103,7 +93,6 @@ export function sanitiseConfig(input: Partial<Config>): Config {
   // An empty continuation would submit a blank line into the user's session.
   if (out.continuationText.trim() === '') out.continuationText = DEFAULT_CONFIG.continuationText;
   if (out.pingText.trim() === '') out.pingText = DEFAULT_CONFIG.pingText;
-  if (out.nudgeText.trim() === '') out.nudgeText = DEFAULT_CONFIG.nudgeText;
   return out;
 }
 

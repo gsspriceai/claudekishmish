@@ -185,6 +185,26 @@ describe('decideClaim', () => {
     expect(decideClaim(stateWithBoundaryDue([]), withIdle, NOW, DAEMON).action).toBe('ping');
   });
 
+  /**
+   * A deliberate decision, recorded here so it is not quietly reversed.
+   *
+   * Claiming through a terminal that is already open would create nothing and
+   * keep the window inside the user's own conversation — but that conversation
+   * may hold work that matters, and a claim is not worth the risk of typing
+   * into it. A claim always starts its own session.
+   */
+  it('never types into an already-open session just to claim a boundary', () => {
+    const openIdle = session({
+      pendingResume: false,
+      limit: null,
+      sessionStatus: 'idle',
+      hasDraftInput: false,
+    });
+    const d = decideClaim(stateWithBoundaryDue([openIdle]), withIdle, NOW, WRAPPER);
+    expect(d.action).toBe('ping');
+    expect(d.reason).toMatch(/new session/);
+  });
+
   it('stands off while another actor holds the boundary', () => {
     const state = stateWithBoundaryDue([]);
     state.ledger.reservation = { boundary: BOUNDARY, owner: 'someone-else', expiresAt: NOW + 60_000 };
@@ -226,95 +246,5 @@ describe('decideClaim', () => {
     const state = stateWithBoundaryDue([]);
     state.ledger.lastClaimedBoundary = BOUNDARY;
     expect(decideClaim(state, withIdle, NOW, DAEMON).action).toBe('none');
-  });
-});
-
-/**
- * The claim ladder, cheapest first:
- *
- *   1. a session already stopped at the limit  -> continue it
- *   2. a session already open and idle         -> nudge it
- *   3. neither                                 -> start a new session
- *
- * Every rung claims the window. The difference is how much is created to do it,
- * and whether the user's own conversation carries the window afterwards.
- */
-describe('claim ladder', () => {
-  /** Open and idle, with nothing pending. */
-  function idleOpen(overrides: Partial<SupervisedSession> = {}): SupervisedSession {
-    return session({
-      pendingResume: false,
-      limit: null,
-      sessionStatus: 'idle',
-      hasDraftInput: false,
-      ...overrides,
-    });
-  }
-
-  it('1. continues a limit-stopped session rather than nudging or starting one', () => {
-    const d = decideClaim(stateWithBoundaryDue([session()]), withIdle, NOW, WRAPPER);
-    expect(d.action).toBe('resume');
-  });
-
-  it('2. nudges an already-open idle session rather than starting a new one', () => {
-    const d = decideClaim(stateWithBoundaryDue([idleOpen()]), withIdle, NOW, WRAPPER);
-    expect(d.action).toBe('nudge');
-    expect(d).toHaveProperty('sessionId', 'sess-1');
-  });
-
-  it('3. starts a new session only when there is nothing open at all', () => {
-    expect(decideClaim(stateWithBoundaryDue([]), withIdle, NOW, WRAPPER).action).toBe('ping');
-  });
-
-  it('will not nudge a session that is busy', () => {
-    // Claude is mid-turn; the window is being claimed by that work anyway.
-    const d = decideClaim(stateWithBoundaryDue([idleOpen({ sessionStatus: 'busy' })]), withIdle, NOW, WRAPPER);
-    expect(d.action).toBe('ping');
-  });
-
-  it('will not nudge a session sitting in a subshell', () => {
-    // Our text would land in the shell, not in Claude.
-    const d = decideClaim(stateWithBoundaryDue([idleOpen({ sessionStatus: 'shell' })]), withIdle, NOW, WRAPPER);
-    expect(d.action).toBe('ping');
-  });
-
-  it('will not nudge when the user has something typed but not sent', () => {
-    // Injecting would append to their draft and press Enter for them.
-    const d = decideClaim(stateWithBoundaryDue([idleOpen({ hasDraftInput: true })]), withIdle, NOW, WRAPPER);
-    expect(d.action).toBe('ping');
-  });
-
-  it('will not nudge a paused session', () => {
-    const d = decideClaim(stateWithBoundaryDue([idleOpen({ paused: true })]), withIdle, NOW, WRAPPER);
-    expect(d.action).toBe('ping');
-  });
-
-  it('will not nudge a session we do not own the pty for', () => {
-    const d = decideClaim(stateWithBoundaryDue([idleOpen({ ptyOwned: false })]), withIdle, NOW, WRAPPER);
-    expect(d.action).toBe('ping');
-  });
-
-  it('will not nudge a session still inside an uncleared limit', () => {
-    const stuck = idleOpen({ limit: sessionLimit({ resetAt: NOW + 3600_000 }) });
-    expect(decideClaim(stateWithBoundaryDue([stuck]), withIdle, NOW, WRAPPER).action).toBe('ping');
-  });
-
-  it('defers to the process that owns an open session, rather than starting one', () => {
-    // The daemon cannot type into someone else's terminal, and spawning a
-    // session when one is sitting right there is the thing to avoid.
-    const d = decideClaim(stateWithBoundaryDue([idleOpen()]), withIdle, NOW, DAEMON);
-    expect(d.action).toBe('defer');
-  });
-
-  it('falls back to starting a session if that process never acts', () => {
-    const late = BOUNDARY + config.boundaryBufferMs + config.resumeDeferGraceMs + 1;
-    expect(decideClaim(stateWithBoundaryDue([idleOpen()]), withIdle, late, DAEMON).action).toBe('ping');
-  });
-
-  it('nudging is still bounded by the weekly cap', () => {
-    const state = stateWithBoundaryDue([idleOpen()], {
-      weekly: { suspendedUntil: null, idleClaims: Array.from({ length: 14 }, () => NOW - 1000) },
-    });
-    expect(decideClaim(state, withIdle, NOW, WRAPPER).action).toBe('none');
   });
 });

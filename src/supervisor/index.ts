@@ -189,11 +189,6 @@ export interface TickContext {
   actor: Actor;
   /** Perform the in-place continuation. Only meaningful for a PTY owner. */
   resume: (sessionId: string) => Promise<boolean>;
-  /**
-   * Type a single word into an already-open, idle session to claim the
-   * boundary through it, instead of starting a new session. PTY owner only.
-   */
-  nudge?: (sessionId: string) => Promise<boolean>;
   config: Config;
 }
 
@@ -219,7 +214,7 @@ export async function tick(ctx: TickContext): Promise<ClaimDecision> {
     const d = decideClaim(next, ctx.config, now, ctx.actor);
 
     // Take an owned hold only for actions this process will actually attempt.
-    if (d.action === 'resume' || d.action === 'ping' || d.action === 'nudge') {
+    if (d.action === 'resume' || d.action === 'ping') {
       next = { ...next, ledger: reserveBoundary(next.ledger, ctx.actor.id, now) };
     }
     return { next, result: d };
@@ -258,26 +253,6 @@ export async function tick(ctx: TickContext): Promise<ClaimDecision> {
       return { next, result: undefined };
     });
     logAction(ok ? 'resume.ok' : 'resume.failed', { sessionId: decision.sessionId });
-    return decision;
-  }
-
-  if (decision.action === 'nudge') {
-    const ok = ctx.nudge ? await ctx.nudge(decision.sessionId) : false;
-    await mutateState((state) => {
-      if (!ok) return { ...state, ledger: releaseReservation(state.ledger, ctx.actor.id) };
-      const stamped = Date.now();
-      return {
-        ...state,
-        ledger: commitClaim(state.ledger, ctx.actor.id, stamped),
-        // A nudge spends quota exactly like a ping, so it counts against the
-        // same weekly cap. Only the delivery differs.
-        weekly: {
-          ...state.weekly,
-          idleClaims: [...state.weekly.idleClaims, stamped].filter((t) => stamped - t < WEEK_MS),
-        },
-      };
-    });
-    logAction(ok ? 'nudge.ok' : 'nudge.failed', { sessionId: decision.sessionId });
     return decision;
   }
 
@@ -389,7 +364,7 @@ export async function deregisterSession(sessionId: string): Promise<void> {
  * Publish whether the user has an unsubmitted draft.
  *
  * Only the process owning the PTY can know this, so only it reports it — and it
- * must, because the decision to nudge is taken from shared state.
+ * must, so that `ckm status` can report it.
  */
 export async function reportDraftInput(sessionId: string, hasDraft: boolean): Promise<void> {
   await mutateState((state) => {

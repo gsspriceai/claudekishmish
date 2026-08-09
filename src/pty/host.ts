@@ -43,7 +43,8 @@ export interface PtySession {
  *
  * Deliberately conservative: anything that is not clearly a submit or a clear
  * leaves the draft flag set, because a false "no draft" is the expensive
- * mistake and a false "has draft" only means we skip one nudge.
+ * mistake — it submits the user's half-written message — while a false "has
+ * draft" only costs us one deferred continuation.
  */
 export function draftTracker() {
   let dirty = false;

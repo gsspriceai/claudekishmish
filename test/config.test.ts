@@ -56,19 +56,14 @@ describe('sanitiseConfig', () => {
   it('refuses an empty continuation, which would submit a blank line', () => {
     expect(sanitiseConfig({ continuationText: '   ' }).continuationText).toBe(DEFAULT_CONFIG.continuationText);
     expect(sanitiseConfig({ pingText: '' }).pingText).toBe(DEFAULT_CONFIG.pingText);
-    expect(sanitiseConfig({ nudgeText: '  ' }).nudgeText).toBe(DEFAULT_CONFIG.nudgeText);
   });
 });
 
 describe('the words we type into a terminal', () => {
   it('every one of them is safe to inject', () => {
-    // These are the only three strings this tool ever types into someone's
-    // session, so all three must survive the injection guard.
-    for (const text of [
-      DEFAULT_CONFIG.continuationText,
-      DEFAULT_CONFIG.pingText,
-      DEFAULT_CONFIG.nudgeText,
-    ]) {
+    // These are the only strings this tool ever types into someone's session,
+    // so both must survive the injection guard.
+    for (const text of [DEFAULT_CONFIG.continuationText, DEFAULT_CONFIG.pingText]) {
       expect(isSafeContinuation(text), text).toBe(true);
     }
   });
@@ -84,15 +79,7 @@ describe('the words we type into a terminal', () => {
     }
   });
 
-  it('the nudge explains itself, because it lands in real work', () => {
-    // A throwaway session can say "ok"; a conversation the user will scroll back
-    // through cannot, or they find an unexplained exchange in the middle of it.
-    expect(DEFAULT_CONFIG.nudgeText).not.toBe(DEFAULT_CONFIG.pingText);
-    expect(DEFAULT_CONFIG.nudgeText.toLowerCase()).toContain('claudekishmish');
-    expect(DEFAULT_CONFIG.nudgeText.length).toBeGreaterThan(20);
-  });
-
-  it('the ping stays short, because nobody reads a throwaway session', () => {
+  it('the ping stays short, because it only ever starts a throwaway session', () => {
     expect(DEFAULT_CONFIG.pingText.length).toBeLessThanOrEqual(8);
   });
 

@@ -135,28 +135,18 @@ export async function runWrap(args: string[]): Promise<number> {
     return outcome.ok;
   };
 
-  /** Claim the boundary through this already-open session, rather than a new one. */
-  const nudge = async (): Promise<boolean> => {
-    if (pty.hasDraftInput()) {
-      logInfo('nudge.skipped', { reason: 'user has an unsent draft' });
-      return false;
-    }
-    const outcome = await injectContinuation(pty, loadConfig().nudgeText);
-    if (!outcome.ok) logInfo('nudge.skipped', { reason: outcome.reason });
-    return outcome.ok;
-  };
-
   let ticking = false;
   let stopped = false;
   const loop = setInterval(() => {
     if (stopped || !sessionId || ticking) return;
     ticking = true;
     const id = sessionId;
-    // Publish draft state before deciding: a nudge is chosen from shared state.
+    // Publish draft state so `ckm status` can show it; the guard that matters
+    // is re-checked inside injectContinuation at the moment of writing.
     void reportDraftInput(id, pty.hasDraftInput())
       .catch(() => undefined)
       // Re-read config every tick so `ckm config set` reaches a running wrapper.
-      .then(() => tick({ actor: { id: ACTOR_ID, ownSessionId: id }, resume, nudge, config: loadConfig() }))
+      .then(() => tick({ actor: { id: ACTOR_ID, ownSessionId: id }, resume, config: loadConfig() }))
       .catch((err: Error) => logError('tick.failed', { message: err.message }))
       .finally(() => {
         ticking = false;

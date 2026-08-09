@@ -119,22 +119,25 @@ After `ckm setup`, use `claude` exactly as you always have. The shim wraps it.
 
 ## How a boundary gets claimed
 
-Cheapest rung first. Every one of them claims the window; they differ in how
-much has to be created to do it.
+Two cases, and only two:
 
 | | Situation | What happens |
 |---|---|---|
-| 1 | A session stopped at the limit | **Continue it.** Continuing *is* claiming — nothing new is needed. |
-| 2 | A session is open and idle | **Nudge it** — one word into the terminal you already have. No new process, no throwaway transcript, and the window is carried by your own conversation. |
-| 3 | Neither | **Start a session.** Only now is anything created. |
+| 1 | A session stopped at the limit | **Continue it.** Continuing *is* claiming — nothing new is created. |
+| 2 | Anything else | **Start a fresh session** just to make the claim. |
 
-Rung 2 types into a terminal a person may be sitting at, so it is fenced in:
-only a session Claude Code itself reports as `idle` (not `busy`, not in a
-subshell), only one we own the PTY for, never one that is paused, and **never
+There is a tempting middle option — typing a word into a terminal that is
+already open and idle, which would create nothing and keep the window inside
+your own conversation. It is deliberately not done. An idle terminal may still
+hold work that matters, and a claim is not worth the risk of putting a stray
+exchange in the middle of it.
+
+The continuation in case 1 is fenced regardless: never when a session is paused,
+never on a limit that predates this run, never past the resume cap, and **never
 when you have something typed but not sent**. We forward every keystroke, so we
-know when the input box has a draft in it — and appending to a half-written
-message and pressing Enter for you is the one way this tool could destroy work
-instead of saving it.
+know when the input box has a draft in it — appending to a half-written message
+and pressing Enter for you is the one way this tool could destroy work instead
+of saving it.
 
 ## Safety
 

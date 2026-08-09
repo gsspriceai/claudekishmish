@@ -25,7 +25,6 @@ import { isBoundaryDue, nextBoundary, reservedByOther } from './ledger.js';
 
 export type ClaimDecision =
   | { action: 'resume'; sessionId: string; reason: string }
-  | { action: 'nudge'; sessionId: string; reason: string }
   | { action: 'ping'; reason: string }
   | { action: 'defer'; sessionId: string; reason: string }
   | { action: 'none'; reason: string };
@@ -88,39 +87,6 @@ export function sessionResumable(
     };
   }
   return { ok: true, reason: 'eligible' };
-}
-
-/**
- * Can this session be nudged — a single word typed into a terminal that is
- * already open, to claim the boundary without starting anything new?
- *
- * Cheaper in every sense than spawning a session: no new process, no throwaway
- * transcript, and the conversation the user comes back to is the one they left.
- * But it types into a terminal a person may be sitting at, so the bar is high.
- */
-export function sessionNudgeable(
-  session: SupervisedSession,
-  now: number,
-): { ok: boolean; reason: string } {
-  if (session.paused) return { ok: false, reason: 'session paused by user' };
-  if (!session.ptyOwned) return { ok: false, reason: 'we do not own this pty' };
-  if (session.pendingResume) return { ok: false, reason: 'this one is waiting to be continued' };
-
-  // A limit that has not cleared means a nudge would just bounce off it.
-  if (session.limit && session.limit.resetAt !== null && now < session.limit.resetAt) {
-    return { ok: false, reason: 'still inside a limit' };
-  }
-  // Only a session sitting idle. `busy` means Claude is mid-turn; `shell` means
-  // the user is in a subshell and our text would land in *that*.
-  if (session.sessionStatus !== 'idle') {
-    return { ok: false, reason: `session is ${session.sessionStatus ?? 'unknown'}, not idle` };
-  }
-  // The one way this tool could destroy work: appending to a half-typed message
-  // and pressing Enter.
-  if (session.hasDraftInput) {
-    return { ok: false, reason: 'the user has something typed but not sent' };
-  }
-  return { ok: true, reason: 'idle and safe to nudge' };
 }
 
 /** Is an idle ping allowed right now? */
@@ -200,35 +166,12 @@ export function decideClaim(
   }
 
   const idle = idleClaimAllowed(state, config, now);
-  if (!idle.ok) return { action: 'none', reason: idle.reason };
-
-  // Prefer a terminal that is already open over starting a new session. Same
-  // request either way, but nothing new is created and the user's own
-  // conversation is the one that carries the window.
-  const mineToNudge = actor.ownSessionId ? state.sessions[actor.ownSessionId] : undefined;
-  if (mineToNudge && sessionNudgeable(mineToNudge, now).ok) {
-    return {
-      action: 'nudge',
-      sessionId: mineToNudge.sessionId,
-      reason: `"${mineToNudge.name}" is open and idle — claiming through it`,
-    };
+  if (idle.ok) {
+    // Deliberately a fresh session rather than typing into one that is already
+    // open. A terminal sitting idle may still hold work the user cares about,
+    // and a claim is not worth the risk of disturbing it.
+    return { action: 'ping', reason: 'no pending work — claiming with a new session' };
   }
 
-  // Someone else owns an open, idle session: let them nudge it rather than
-  // spawning a session nobody asked for — bounded, as with `defer`.
-  const othersIdle = Object.values(state.sessions).find(
-    (s) => s.sessionId !== actor.ownSessionId && sessionNudgeable(s, now).ok,
-  );
-  if (othersIdle && boundary !== null) {
-    const graceOver = now >= boundary + config.boundaryBufferMs + config.resumeDeferGraceMs;
-    if (!graceOver) {
-      return {
-        action: 'defer',
-        sessionId: othersIdle.sessionId,
-        reason: `"${othersIdle.name}" is open elsewhere — letting its own process claim through it`,
-      };
-    }
-  }
-
-  return { action: 'ping', reason: 'nothing open to claim through — starting a session' };
+  return { action: 'none', reason: idle.reason };
 }
