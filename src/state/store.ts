@@ -3,53 +3,78 @@
  *
  * This is the whole coordination layer. The daemon and every wrapper
  * read-modify-write the same JSON under an exclusive lock; there is no socket,
- * no named pipe, and therefore no per-platform IPC to get wrong. Boundaries land
- * on a 10-minute grid, so a lock held for a few milliseconds and a poll measured
- * in seconds are both far more precision than the problem needs.
+ * no named pipe, and therefore no per-platform IPC to get wrong.
  *
- * The lock is an exclusively-created file (`wx`), which is atomic on Windows,
- * macOS and Linux alike. Locks left behind by a killed process are reclaimed
- * once they go stale.
+ * Two properties matter and both were learned the hard way:
+ *
+ *   - **The lock must not block the event loop.** A wrapper is pumping a live
+ *     PTY; a synchronous spin would freeze the user's terminal for as long as
+ *     the lock is contended. Waiting is therefore `await`, not `Atomics.wait`.
+ *   - **The critical section must be short.** It holds no I/O beyond this file.
+ *     Callers read transcripts *before* taking the lock and pass the result in.
+ *
+ * The lock is an exclusively-created file (`wx`), atomic on Windows, macOS and
+ * Linux alike, whose mtime is refreshed while held so a slow section is never
+ * mistaken for an abandoned one.
  */
 
 import fs from 'node:fs';
+import fsp from 'node:fs/promises';
 import { statePath, stateLockPath, ckmHome } from '../platform/paths.js';
 import { emptyState, type State } from './schema.js';
 
-const LOCK_STALE_MS = 30_000;
-const LOCK_RETRY_MS = 25;
+const LOCK_STALE_MS = 15_000;
+const LOCK_HEARTBEAT_MS = 3_000;
+const LOCK_RETRY_MS = 20;
 const LOCK_TIMEOUT_MS = 10_000;
 
-function sleepSync(ms: number): void {
-  // Deliberately synchronous: the critical section is tiny and making it async
-  // would let two ticks of the same process interleave inside the lock.
-  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+/** A held lock, with the heartbeat that keeps it from looking stale. */
+interface HeldLock {
+  heartbeat: NodeJS.Timeout;
 }
 
-function lockIsStale(): boolean {
+async function lockIsStale(): Promise<boolean> {
   try {
-    const stat = fs.statSync(stateLockPath());
+    const stat = await fsp.stat(stateLockPath());
     return Date.now() - stat.mtimeMs > LOCK_STALE_MS;
   } catch {
     return false;
   }
 }
 
-function acquireLock(): void {
-  fs.mkdirSync(ckmHome(), { recursive: true });
+async function acquireLock(): Promise<HeldLock> {
+  await fsp.mkdir(ckmHome(), { recursive: true });
   const deadline = Date.now() + LOCK_TIMEOUT_MS;
+
   for (;;) {
     try {
-      const fd = fs.openSync(stateLockPath(), 'wx');
-      fs.writeSync(fd, String(process.pid));
-      fs.closeSync(fd);
-      return;
+      const handle = await fsp.open(stateLockPath(), 'wx');
+      await handle.writeFile(String(process.pid));
+      await handle.close();
+
+      // Refresh the mtime while we hold it: a section that legitimately runs
+      // long must never be reclaimed out from under itself, because the
+      // reclaiming process would then delete *our* lock on its way out.
+      const heartbeat = setInterval(() => {
+        const now = new Date();
+        try {
+          fs.utimesSync(stateLockPath(), now, now);
+        } catch {
+          /* released underneath us; nothing to refresh */
+        }
+      }, LOCK_HEARTBEAT_MS);
+      heartbeat.unref?.();
+
+      return { heartbeat };
     } catch (err) {
       const code = (err as NodeJS.ErrnoException).code;
       if (code !== 'EEXIST') throw err;
-      if (lockIsStale()) {
+
+      if (await lockIsStale()) {
         try {
-          fs.unlinkSync(stateLockPath());
+          await fsp.unlink(stateLockPath());
         } catch {
           /* another process reclaimed it first */
         }
@@ -58,72 +83,78 @@ function acquireLock(): void {
       if (Date.now() > deadline) {
         throw new Error('timed out waiting for the claudekishmish state lock');
       }
-      sleepSync(LOCK_RETRY_MS);
+      await sleep(LOCK_RETRY_MS);
     }
   }
 }
 
-function releaseLock(): void {
+async function releaseLock(held: HeldLock): Promise<void> {
+  clearInterval(held.heartbeat);
   try {
-    fs.unlinkSync(stateLockPath());
+    await fsp.unlink(stateLockPath());
   } catch {
     /* already gone */
   }
 }
 
+function parseState(raw: string): State {
+  const parsed = JSON.parse(raw) as State;
+  if (!parsed || parsed.version !== 1) return emptyState(Date.now());
+  // Tolerate files written by an older build that lacked a field.
+  const base = emptyState(Date.now());
+  return { ...base, ...parsed, ledger: { ...base.ledger, ...parsed.ledger } };
+}
+
 /** Read state without locking. Fine for display; never for read-modify-write. */
 export function readState(): State {
   try {
-    const parsed = JSON.parse(fs.readFileSync(statePath(), 'utf8')) as State;
-    if (parsed && parsed.version === 1) {
-      // Tolerate files written by an older build that lacked a field.
-      return { ...emptyState(Date.now()), ...parsed };
-    }
-    return emptyState(Date.now());
+    return parseState(fs.readFileSync(statePath(), 'utf8'));
   } catch {
     // Missing or corrupt state is not an error: we simply have no history yet.
     return emptyState(Date.now());
   }
 }
 
-function writeStateUnlocked(state: State): void {
-  fs.mkdirSync(ckmHome(), { recursive: true });
-  const tmp = statePath() + '.tmp';
-  fs.writeFileSync(tmp, JSON.stringify(state, null, 2) + '\n', 'utf8');
-  fs.renameSync(tmp, statePath());
+async function writeStateUnlocked(state: State): Promise<void> {
+  await fsp.mkdir(ckmHome(), { recursive: true });
+  const tmp = `${statePath()}.${process.pid}.tmp`;
+  await fsp.writeFile(tmp, JSON.stringify(state, null, 2) + '\n', 'utf8');
+  await fsp.rename(tmp, statePath());
 }
 
 /**
  * Atomically transform the state.
  *
- * The mutator receives the current state and returns the next one. It runs
- * inside the lock, so it must not perform slow I/O — decide first, then act on
- * the decision after this returns.
+ * The mutator runs inside the lock and must be synchronous and fast: decide
+ * here, then act on the returned decision after this resolves.
  */
-export function updateState<T>(mutate: (state: State) => { next: State; result: T }): T {
-  acquireLock();
+export async function updateState<T>(
+  mutate: (state: State) => { next: State; result: T },
+): Promise<T> {
+  const held = await acquireLock();
   try {
     const current = readState();
     const { next, result } = mutate(current);
     next.updatedAt = Date.now();
-    writeStateUnlocked(next);
+    await writeStateUnlocked(next);
     return result;
   } finally {
-    releaseLock();
+    await releaseLock(held);
   }
 }
 
 /** Convenience wrapper for mutations with nothing to report back. */
-export function mutateState(mutate: (state: State) => State): void {
-  updateState((s) => ({ next: mutate(s), result: undefined }));
+export async function mutateState(mutate: (state: State) => State): Promise<void> {
+  await updateState((s) => ({ next: mutate(s), result: undefined }));
 }
 
 /** Test-only: wipe state so a suite starts from a known point. */
 export function resetStateForTests(): void {
-  releaseLock();
-  try {
-    fs.unlinkSync(statePath());
-  } catch {
-    /* nothing to remove */
+  for (const p of [statePath(), stateLockPath()]) {
+    try {
+      fs.unlinkSync(p);
+    } catch {
+      /* nothing to remove */
+    }
   }
 }

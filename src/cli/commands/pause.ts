@@ -1,9 +1,11 @@
 /**
  * `ckm pause` / `ckm resume` — the kill switch.
  *
- * This has to be trustworthy above all else. The user asked for a way to stop
- * the automation before going to sleep, so both the wrapper and the daemon
- * re-read this flag on every tick and again immediately before acting.
+ * This has to be trustworthy above all else. Both the wrapper and the daemon
+ * re-read these flags on every tick and again immediately before acting.
+ *
+ * `ckm resume --all` is also how a user clears a halt after fixing their login
+ * or subscription.
  */
 
 import { mutateState, readState } from '../../state/store.js';
@@ -17,8 +19,7 @@ function resolveSessionId(explicit?: string): string | null {
   const cwd = process.cwd();
 
   const here = Object.values(state.sessions).filter((s) => s.cwd === cwd);
-  if (here.length === 1) return here[0]!.sessionId;
-  if (here.length > 1) {
+  if (here.length > 0) {
     // Most recently registered wins; it is the one the user is looking at.
     return here.sort((a, b) => b.registeredAt - a.registeredAt)[0]!.sessionId;
   }
@@ -27,12 +28,14 @@ function resolveSessionId(explicit?: string): string | null {
   return live[0]?.sessionId ?? null;
 }
 
-export function runPause(opts: { all?: boolean; session?: string }): number {
+export async function runPause(opts: { all?: boolean; session?: string }): Promise<number> {
   if (opts.all) {
-    mutateState((s) => ({ ...s, globalPaused: true }));
+    await mutateState((s) => ({ ...s, globalPaused: true }));
     logAction('pause.all', {});
-    process.stdout.write('Paused everything. Nothing will be continued or claimed.\n');
-    process.stdout.write('Re-enable with `ckm resume --all`.\n');
+    process.stdout.write(
+      'Paused everything. Nothing will be continued or claimed.\n' +
+        'Re-enable with `ckm resume --all`.\n',
+    );
     return 0;
   }
 
@@ -45,8 +48,7 @@ export function runPause(opts: { all?: boolean; session?: string }): number {
     return 1;
   }
 
-  const found = mutateSession(id, true);
-  if (!found) {
+  if (!(await setPaused(id, true))) {
     process.stderr.write(`Session ${id} is not being supervised.\n`);
     return 1;
   }
@@ -55,11 +57,15 @@ export function runPause(opts: { all?: boolean; session?: string }): number {
   return 0;
 }
 
-export function runResume(opts: { all?: boolean; session?: string }): number {
+export async function runResume(opts: { all?: boolean; session?: string }): Promise<number> {
   if (opts.all) {
-    mutateState((s) => ({ ...s, globalPaused: false }));
-    logAction('resume.all', {});
+    const wasHalted = readState().halted;
+    await mutateState((s) => ({ ...s, globalPaused: false, halted: null }));
+    logAction('resume.all', { clearedHalt: Boolean(wasHalted) });
     process.stdout.write('Resumed. Automation is active again.\n');
+    if (wasHalted) {
+      process.stdout.write(`Cleared the halt that was set by: ${wasHalted.detail}\n`);
+    }
     return 0;
   }
 
@@ -68,8 +74,7 @@ export function runResume(opts: { all?: boolean; session?: string }): number {
     process.stderr.write('No supervised session found for this directory.\n');
     return 1;
   }
-  const found = mutateSession(id, false);
-  if (!found) {
+  if (!(await setPaused(id, false))) {
     process.stderr.write(`Session ${id} is not being supervised.\n`);
     return 1;
   }
@@ -78,9 +83,9 @@ export function runResume(opts: { all?: boolean; session?: string }): number {
   return 0;
 }
 
-function mutateSession(sessionId: string, paused: boolean): boolean {
+async function setPaused(sessionId: string, paused: boolean): Promise<boolean> {
   let found = false;
-  mutateState((state) => {
+  await mutateState((state) => {
     const session = state.sessions[sessionId];
     if (!session) return state;
     found = true;

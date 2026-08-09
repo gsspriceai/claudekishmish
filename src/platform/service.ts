@@ -2,35 +2,68 @@
  * Background service registration, per platform.
  *
  * The daemon has to survive terminal closure, because the whole point is that it
- * runs while nobody is at the machine. Rather than shipping a bespoke service
- * manager we write the native unit for each OS and let the OS supervise it.
+ * runs while nobody is at the machine.
  *
- * Nothing here runs a privileged command: all three targets are per-user.
+ * Every command here is **absolute and per-user**:
+ *
+ *   - launchd passes `ProgramArguments[0]` straight to `posix_spawn` and does no
+ *     PATH lookup, so a bare `ckm` fails with ENOENT on every respawn.
+ *   - systemd rejects a unit whose `ExecStart` is not an absolute path.
+ *   - `schtasks /SC ONLOGON` requires elevation, so Windows uses the per-user
+ *     Startup folder instead, which does not.
+ *
+ * `CKM_HOME` is propagated: without it a daemon started at login reads a
+ * different state file than a CLI run from a shell that sets it.
  */
 
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
+import { fileURLToPath } from 'node:url';
+import { ckmHome } from './paths.js';
 
 export interface ServicePlan {
-  kind: 'launchd' | 'systemd' | 'schtasks' | 'unsupported';
-  /** Where the unit file goes, if there is one. */
+  kind: 'launchd' | 'systemd' | 'startup-folder' | 'unsupported';
+  /** Where the unit or script goes. */
   unitPath?: string;
   unitContents?: string;
-  /** The command the user runs to activate it. */
+  /** The command the user runs to activate it, ready to copy and paste. */
   activate: string[];
   notes: string;
 }
 
 const LABEL = 'com.claudekishmish.daemon';
 
-function ckmBin(): string {
-  // Prefer the globally-installed launcher; fall back to this very script.
-  return process.platform === 'win32' ? 'ckm.cmd' : 'ckm';
+/** Absolute path to this CLI's entry script. */
+export function cliEntryPath(): string {
+  try {
+    // dist/platform/service.js -> dist/cli/index.js
+    const here = path.dirname(fileURLToPath(import.meta.url));
+    const candidate = path.resolve(here, '..', 'cli', 'index.js');
+    if (fs.existsSync(candidate)) return candidate;
+  } catch {
+    /* fall through */
+  }
+  return process.argv[1] ?? 'ckm';
+}
+
+/** `node /abs/path/to/cli/index.js daemon`, with node itself absolute too. */
+export function daemonCommand(): { node: string; script: string } {
+  return { node: process.execPath, script: cliEntryPath() };
+}
+
+function xmlEscape(s: string): string {
+  return s
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
 }
 
 export function planService(): ServicePlan {
   const home = os.homedir();
+  const { node, script } = daemonCommand();
+  const stateDir = ckmHome();
 
   if (process.platform === 'darwin') {
     const unitPath = path.join(home, 'Library', 'LaunchAgents', `${LABEL}.plist`);
@@ -43,15 +76,23 @@ export function planService(): ServicePlan {
 <dict>
   <key>Label</key><string>${LABEL}</string>
   <key>ProgramArguments</key>
-  <array><string>${ckmBin()}</string><string>daemon</string></array>
+  <array>
+    <string>${xmlEscape(node)}</string>
+    <string>${xmlEscape(script)}</string>
+    <string>daemon</string>
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>CKM_HOME</key><string>${xmlEscape(stateDir)}</string>
+  </dict>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><true/>
-  <key>StandardErrorPath</key><string>${path.join(home, '.claudekishmish', 'daemon.err.log')}</string>
+  <key>StandardErrorPath</key><string>${xmlEscape(path.join(stateDir, 'daemon.err.log'))}</string>
 </dict>
 </plist>
 `,
-      activate: ['launchctl', 'load', '-w', unitPath],
-      notes: 'Runs at login and restarts if it dies.',
+      activate: ['launchctl', 'bootstrap', `gui/${process.getuid?.() ?? 501}`, unitPath],
+      notes: 'Runs at login and restarts if it dies. On macOS 10.x use: launchctl load -w ' + unitPath,
     };
   }
 
@@ -64,7 +105,9 @@ export function planService(): ServicePlan {
 Description=claudekishmish usage-window claimer
 
 [Service]
-ExecStart=${ckmBin()} daemon
+Type=simple
+Environment=CKM_HOME=${stateDir}
+ExecStart=${node} ${script} daemon
 Restart=always
 RestartSec=30
 
@@ -72,27 +115,33 @@ RestartSec=30
 WantedBy=default.target
 `,
       activate: ['systemctl', '--user', 'enable', '--now', 'claudekishmish.service'],
-      notes: 'Enable lingering (loginctl enable-linger $USER) to run while logged out.',
+      notes:
+        'Run `loginctl enable-linger $USER` too, so it keeps running while you are logged out.',
     };
   }
 
   if (process.platform === 'win32') {
+    // The per-user Startup folder needs no elevation, unlike schtasks ONLOGON.
+    const startup = path.join(
+      process.env.APPDATA ?? path.join(home, 'AppData', 'Roaming'),
+      'Microsoft',
+      'Windows',
+      'Start Menu',
+      'Programs',
+      'Startup',
+    );
+    const unitPath = path.join(startup, 'claudekishmish.cmd');
     return {
-      kind: 'schtasks',
-      activate: [
-        'schtasks',
-        '/Create',
-        '/TN',
-        'claudekishmish',
-        '/TR',
-        // schtasks takes the whole command as one argument, and it contains a
-        // space — unquoted, Windows parses "daemon" as a schtasks flag.
-        `"${ckmBin()} daemon"`,
-        '/SC',
-        'ONLOGON',
-        '/F',
-      ],
-      notes: 'Registers a per-user logon task. No admin rights required.',
+      kind: 'startup-folder',
+      unitPath,
+      unitContents:
+        '@echo off\r\n' +
+        'REM claudekishmish background boundary claimer (per-user, no admin rights)\r\n' +
+        `set "CKM_HOME=${stateDir}"\r\n` +
+        `start "" /min "${node}" "${script}" daemon\r\n`,
+      activate: [`"${node}"`, `"${script}"`, 'daemon'],
+      notes:
+        'Installed to your Startup folder, so it begins at every login. The command above starts it right now, in this session.',
     };
   }
 
@@ -107,4 +156,15 @@ export function writeServiceUnit(): ServicePlan {
     fs.writeFileSync(plan.unitPath, plan.unitContents, 'utf8');
   }
   return plan;
+}
+
+export function removeServiceUnit(): string | null {
+  const plan = planService();
+  if (!plan.unitPath) return null;
+  try {
+    fs.unlinkSync(plan.unitPath);
+    return plan.unitPath;
+  } catch {
+    return null;
+  }
 }

@@ -1,5 +1,5 @@
 /**
- * Usage-window arithmetic.
+ * Usage-window arithmetic and the boundary reservation protocol.
  *
  * Pure functions only: no clock, no I/O, no Claude. Everything the tool can get
  * *wrong* about timing lives here, so it can all be tested directly.
@@ -18,6 +18,19 @@
  * indistinguishable from a local grid. In the handful of zones offset by :45,
  * boundaries will appear at :05/:15/... in local time. Epoch math is used
  * because it is immune to DST and to laptop suspend.
+ *
+ * ## Reserve, then claim
+ *
+ * A boundary must be consumed exactly once, and *only* by an actor that
+ * actually sent a request. Marking it consumed at decision time is wrong: the
+ * daemon can decide "resume" for a session whose PTY belongs to another
+ * process, and a ping can fail. Either way the boundary would be burnt with
+ * nothing sent, and the ledger would then report a healthy window that does not
+ * exist.
+ *
+ * So: `reserveBoundary` takes a short-lived, owned hold; `commitClaim` converts
+ * it after a request lands; `releaseReservation` gives it back otherwise. A
+ * reservation that expires (its owner died mid-attempt) is reclaimable.
  */
 
 import type { WindowLedger } from '../state/schema.js';
@@ -25,6 +38,8 @@ import type { WindowLedger } from '../state/schema.js';
 export const MINUTE_MS = 60_000;
 export const GRID_MS = 10 * MINUTE_MS;
 export const WINDOW_MS = 5 * 60 * MINUTE_MS;
+/** How long an actor may hold a boundary while trying to act on it. */
+export const RESERVATION_TTL_MS = 3 * MINUTE_MS;
 
 /** Round an epoch time down to the 10-minute grid. */
 export function floor10(t: number): number {
@@ -45,20 +60,26 @@ export function computeWindow(firstMessage: number): { start: number; end: numbe
 /**
  * Fold an observation into the ledger.
  *
- * A server-stated reset (`source: 'reset-message'`) is authoritative and will
- * not be overwritten by our own arithmetic. Anything else only fills a gap or
- * moves the ledger forward — the ledger never walks backwards, which keeps a
- * stale transcript read from resurrecting an expired window.
+ * A server-stated reset outranks our own arithmetic, but **only until that
+ * reset has actually passed**. Without the expiry the ledger freezes forever on
+ * the first limit it ever sees: every later turn is offered as `computed` and
+ * rejected, `nextBoundary` stays permanently in the past, and the tool
+ * evaluates every tick against a boundary that already happened.
+ *
+ * The ledger also never walks backwards, so a stale transcript read cannot
+ * resurrect an expired window.
  */
 export function applyObservation(
   ledger: WindowLedger,
   observation: { end: number; start?: number; source: WindowLedger['source'] },
+  now: number,
 ): WindowLedger {
-  const authoritative = observation.source === 'reset-message';
-  const held = ledger.source === 'reset-message';
+  const incomingIsAuthoritative = observation.source === 'reset-message';
+  const heldIsAuthoritative =
+    ledger.source === 'reset-message' && ledger.currentEnd !== null && now < ledger.currentEnd;
 
-  if (held && !authoritative) return ledger;
-  if (!authoritative && ledger.currentEnd !== null && observation.end <= ledger.currentEnd) {
+  if (heldIsAuthoritative && !incomingIsAuthoritative) return ledger;
+  if (!incomingIsAuthoritative && ledger.currentEnd !== null && observation.end <= ledger.currentEnd) {
     return ledger;
   }
 
@@ -67,9 +88,16 @@ export function applyObservation(
   return { ...ledger, currentStart: start, currentEnd: end, source: observation.source };
 }
 
+/** Is there a live hold on the boundary belonging to someone other than `owner`? */
+export function reservedByOther(ledger: WindowLedger, owner: string, now: number): boolean {
+  const r = ledger.reservation;
+  return r !== null && r.owner !== owner && now < r.expiresAt;
+}
+
 /**
- * The next boundary that is eligible to be claimed, or `null` if we do not know
- * of one. A boundary already recorded in `lastClaimedBoundary` is spent.
+ * The next boundary eligible to be claimed, or `null` if there is none.
+ *
+ * A boundary already in `lastClaimedBoundary` is spent.
  */
 export function nextBoundary(ledger: WindowLedger): number | null {
   if (ledger.currentEnd === null) return null;
@@ -87,7 +115,7 @@ export function nextBoundary(ledger: WindowLedger): number | null {
  */
 export function isBoundaryDue(ledger: WindowLedger, now: number, bufferMs: number): boolean {
   const boundary = nextBoundary(ledger);
-  return boundary !== null && now >= boundary + bufferMs;
+  return boundary !== null && now >= boundary + Math.max(0, bufferMs);
 }
 
 /** Milliseconds until the next boundary is claimable; `null` if unknown. */
@@ -98,20 +126,39 @@ export function msUntilBoundary(
 ): number | null {
   const boundary = nextBoundary(ledger);
   if (boundary === null) return null;
-  return Math.max(0, boundary + bufferMs - now);
+  return Math.max(0, boundary + Math.max(0, bufferMs) - now);
+}
+
+/** Take an owned, expiring hold on the current boundary. */
+export function reserveBoundary(ledger: WindowLedger, owner: string, now: number): WindowLedger {
+  const boundary = nextBoundary(ledger);
+  if (boundary === null) return ledger;
+  return {
+    ...ledger,
+    reservation: { boundary, owner, expiresAt: now + RESERVATION_TTL_MS },
+  };
+}
+
+/** Give the boundary back. Only the owner may release its own hold. */
+export function releaseReservation(ledger: WindowLedger, owner: string): WindowLedger {
+  if (ledger.reservation === null || ledger.reservation.owner !== owner) return ledger;
+  return { ...ledger, reservation: null };
 }
 
 /**
- * Record a claim. The window that the claim itself opens starts at
- * `floor10(claimedAt)` — the claim is a first message like any other.
+ * Convert a reservation into a real claim, after a request actually landed.
+ *
+ * The claim is itself a first message, so it opens a window anchored on the
+ * grid at `floor10(claimedAt)`.
  */
-export function recordClaim(ledger: WindowLedger, claimedAt: number): WindowLedger {
-  const boundary = ledger.currentEnd;
+export function commitClaim(ledger: WindowLedger, owner: string, claimedAt: number): WindowLedger {
+  const boundary = ledger.reservation?.owner === owner ? ledger.reservation.boundary : ledger.currentEnd;
   const { start, end } = computeWindow(claimedAt);
   return {
     currentStart: start,
     currentEnd: end,
     lastClaimedBoundary: boundary ?? floor10(claimedAt),
+    reservation: null,
     source: 'claim',
   };
 }
@@ -119,4 +166,21 @@ export function recordClaim(ledger: WindowLedger, claimedAt: number): WindowLedg
 /** Has the current window already expired as of `now`? */
 export function isExpired(ledger: WindowLedger, now: number): boolean {
   return ledger.currentEnd !== null && now >= ledger.currentEnd;
+}
+
+/**
+ * Rebuild the ledger from raw conversation history.
+ *
+ * Used to bootstrap a daemon that has never seen a window, and to re-sync after
+ * a failure sequence leaves the stored ledger untrustworthy. Windows tile
+ * greedily: each turn outside the previous window anchors a new one.
+ */
+export function deriveLedgerFromTurns(turns: number[]): { start: number; end: number } | null {
+  let current: { start: number; end: number } | null = null;
+  for (const turn of turns) {
+    if (current === null || turn >= current.end) {
+      current = computeWindow(turn);
+    }
+  }
+  return current;
 }

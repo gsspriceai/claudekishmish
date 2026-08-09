@@ -6,28 +6,48 @@
  * same exit code. The difference only shows up when a usage window runs out.
  */
 
-import { locateClaude } from '../../claude/locate.js';
-import { readSessionFiles } from '../../claude/sessions.js';
+import {
+  locateClaude,
+  MAX_SUPERVISION_DEPTH,
+  supervisionDepth,
+  SUPERVISION_DEPTH_VAR,
+} from '../../claude/locate.js';
+import { spawnClaudeSync } from '../../claude/spawn.js';
+import { isInteractiveTerminalSession, readSessionFiles } from '../../claude/sessions.js';
 import { loadConfig } from '../../config/index.js';
-import { logError, logInfo } from '../../logger/index.js';
+import { logError, logInfo, logWarn } from '../../logger/index.js';
 import { injectContinuation } from '../../pty/inject.js';
 import { spawnPty, type PtySession } from '../../pty/host.js';
 import {
+  ACTOR_ID,
   deregisterSession,
   registerSession,
   stillEligible,
   tick,
 } from '../../supervisor/index.js';
 
-/** Wait for Claude Code to publish the session descriptor for our child. */
-async function awaitSessionId(
+/**
+ * Wait for Claude Code to publish the session descriptor for our child.
+ *
+ * Only an interactive CLI session is accepted: that is the entire scope rule for
+ * automatic continuation, and enforcing it here means a background or SDK
+ * session is never registered in the first place.
+ */
+async function awaitSessionDescriptor(
   pid: number,
-  timeoutMs = 20_000,
+  timeoutMs: number,
 ): Promise<{ sessionId: string; cwd: string; name: string; procStart: string | null } | null> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
-    const match = readSessionFiles().find((s) => s.pid === pid);
+    const match = (readSessionFiles() ?? []).find((s) => s.pid === pid);
     if (match) {
+      if (!isInteractiveTerminalSession(match)) {
+        logWarn('wrap.not_interactive', {
+          kind: match.kind,
+          entrypoint: match.entrypoint,
+        });
+        return null;
+      }
       return {
         sessionId: match.sessionId,
         cwd: match.cwd,
@@ -52,14 +72,24 @@ export async function runWrap(args: string[]): Promise<number> {
     return 127;
   }
 
-  // Never supervise a supervised session — that would nest PTYs.
-  if (process.env.CKM_SUPERVISED === '1' || process.env.CKM_INTERNAL === '1') {
-    const { spawnSync } = await import('node:child_process');
-    const r = spawnSync(bin, args, { stdio: 'inherit' });
+  // If the shim ever resolves back to itself, fail loudly rather than forking.
+  const depth = supervisionDepth();
+  if (depth >= MAX_SUPERVISION_DEPTH) {
+    process.stderr.write(
+      'claudekishmish: the shim is resolving to itself — refusing to recurse.\n' +
+        'Run `ckm doctor`; your PATH probably has the shim directory listed twice.\n',
+    );
+    return 1;
+  }
+  if (depth > 0 || process.env.CKM_INTERNAL === '1') {
+    // Already supervised (or an internal call): run Claude straight through.
+    const r = spawnClaudeSync(bin, args, { stdio: 'inherit' });
     return r.status ?? 0;
   }
 
-  const pty: PtySession = await spawnPty(bin, args, process.cwd());
+  const pty: PtySession = await spawnPty(bin, args, process.cwd(), {
+    [SUPERVISION_DEPTH_VAR]: String(depth + 1),
+  });
 
   if (!pty.canInject) {
     process.stderr.write(
@@ -68,12 +98,12 @@ export async function runWrap(args: string[]): Promise<number> {
     );
   }
 
-  const descriptor = await awaitSessionId(pty.pid);
+  const descriptor = await awaitSessionDescriptor(pty.pid, 30_000);
   let sessionId: string | null = null;
 
   if (descriptor) {
     sessionId = descriptor.sessionId;
-    registerSession({
+    await registerSession({
       sessionId: descriptor.sessionId,
       pid: pty.pid,
       procStart: descriptor.procStart,
@@ -86,34 +116,46 @@ export async function runWrap(args: string[]): Promise<number> {
       limit: null,
     });
   } else {
-    logError('wrap.no_session_descriptor', { pid: pty.pid });
+    logWarn('wrap.no_session_descriptor', { pid: pty.pid });
+    process.stderr.write(
+      'claudekishmish: this session was not registered, so it will not be auto-continued.\n' +
+        '(Claude Code published no interactive session descriptor for it.)\n',
+    );
   }
 
   const resume = async (id: string): Promise<boolean> => {
     // State can change between scheduling a resume and performing it.
-    if (!stillEligible(id, config)) {
+    if (!stillEligible(id, loadConfig())) {
       logInfo('resume.skipped', { sessionId: id, reason: 'no longer eligible' });
       return false;
     }
-    const outcome = await injectContinuation(pty, config.continuationText);
+    const outcome = await injectContinuation(pty, loadConfig().continuationText);
     if (!outcome.ok) logError('resume.inject_failed', { reason: outcome.reason });
     return outcome.ok;
   };
 
+  let ticking = false;
   let stopped = false;
   const loop = setInterval(() => {
-    if (stopped || !sessionId) return;
-    void tick({ ownSessionId: sessionId, resume, config }).catch((err: Error) => {
-      logError('tick.failed', { message: err.message });
-    });
+    if (stopped || !sessionId || ticking) return;
+    ticking = true;
+    // Re-read config every tick so `ckm config set` reaches a running wrapper.
+    void tick({ actor: { id: ACTOR_ID, ownSessionId: sessionId }, resume, config: loadConfig() })
+      .catch((err: Error) => logError('tick.failed', { message: err.message }))
+      .finally(() => {
+        ticking = false;
+      });
   }, config.pollIntervalMs);
+  loop.unref?.();
 
   return await new Promise<number>((resolve) => {
     pty.onExit((code) => {
       stopped = true;
       clearInterval(loop);
-      if (sessionId) deregisterSession(sessionId);
-      resolve(code);
+      void (async () => {
+        if (sessionId) await deregisterSession(sessionId);
+        resolve(code);
+      })();
     });
   });
 }

@@ -5,10 +5,17 @@
  * with the same shape on all three platforms. That file is the whole reason the
  * "only sessions open in a terminal" rule is cheap to enforce:
  *
- *     kind === 'interactive'  &&  pid alive  &&  procStart unchanged
+ *     kind === 'interactive'  &&  entrypoint === 'cli'
+ *     &&  pid alive  &&  procStart unchanged
  *
- * The `procStart` check matters. PIDs are recycled, and without it a stale
- * descriptor could point us at whatever unrelated process inherited the number.
+ * All four clauses matter, and the check has to be applied at *registration*
+ * and at *every* liveness check — not just in a helper that reporting code
+ * happens to call. A background agent or an SDK session is not a terminal the
+ * user is sitting in front of, and typing into one is exactly the behaviour
+ * this tool must never have.
+ *
+ * The `procStart` clause guards PID reuse: a matching pid with a different
+ * start stamp is a different process.
  */
 
 import fs from 'node:fs';
@@ -40,13 +47,24 @@ export function pidAlive(pid: number): boolean {
   }
 }
 
-/** Read every session descriptor, skipping unreadable or malformed files. */
-export function readSessionFiles(dir = claudeSessionsDir()): ClaudeSessionFile[] {
+/** The one predicate that defines "open in a terminal". */
+export function isInteractiveTerminalSession(s: ClaudeSessionFile): boolean {
+  return s.kind === 'interactive' && s.entrypoint === 'cli';
+}
+
+/**
+ * Read every session descriptor.
+ *
+ * Returns `null` — not `[]` — when the directory itself cannot be read, so a
+ * transient failure is distinguishable from "no sessions". Callers that prune
+ * state must not treat the two the same.
+ */
+export function readSessionFiles(dir = claudeSessionsDir()): ClaudeSessionFile[] | null {
   let names: string[];
   try {
     names = fs.readdirSync(dir);
   } catch {
-    return [];
+    return null;
   }
 
   const out: ClaudeSessionFile[] = [];
@@ -59,42 +77,65 @@ export function readSessionFiles(dir = claudeSessionsDir()): ClaudeSessionFile[]
         out.push(parsed);
       }
     } catch {
-      // A half-written descriptor is normal during session startup.
+      // A half-written descriptor is normal: Claude Code rewrites these
+      // continuously as session status changes.
     }
   }
   return out;
 }
 
-/**
- * Sessions that are interactive, CLI-launched, and whose process is still there.
- *
- * `isAlive` is injectable so tests can exercise liveness without spawning
- * processes.
- */
+/** Sessions that are interactive, CLI-launched, and whose process is still there. */
 export function liveTerminalSessions(
   dir = claudeSessionsDir(),
   isAlive: (pid: number) => boolean = pidAlive,
 ): ClaudeSessionFile[] {
-  return readSessionFiles(dir).filter(
-    (s) => s.kind === 'interactive' && s.entrypoint === 'cli' && isAlive(s.pid),
+  return (readSessionFiles(dir) ?? []).filter(
+    (s) => isInteractiveTerminalSession(s) && isAlive(s.pid),
   );
 }
 
+/** Outcome of a liveness check, distinguishing "gone" from "could not tell". */
+export type LivenessResult = 'alive' | 'gone' | 'unknown';
+
 /**
- * Confirm a previously-registered session is still the same process.
+ * Is this supervised session still the same live, interactive process?
  *
- * Returns false on PID reuse, which is exactly when a naive `pidAlive` check
- * would have returned a dangerous true.
+ * `unknown` is returned when the descriptor could not be read this time round.
+ * Descriptors are rewritten constantly, so a single unreadable read is expected
+ * and must not unsupervise a live session.
  */
+export function checkSessionLiveness(
+  sessionId: string,
+  procStart: string | null,
+  pid: number | null,
+  dir = claudeSessionsDir(),
+  isAlive: (pid: number) => boolean = pidAlive,
+): LivenessResult {
+  const files = readSessionFiles(dir);
+  if (files === null) return 'unknown';
+
+  const match = files.find((s) => s.sessionId === sessionId);
+  if (!match) {
+    // The descriptor is removed when the session exits, but it is also briefly
+    // absent while being rewritten. If the process we registered is still
+    // running, believe the process.
+    if (pid !== null && isAlive(pid)) return 'unknown';
+    return 'gone';
+  }
+
+  if (!isInteractiveTerminalSession(match)) return 'gone';
+  if (!isAlive(match.pid)) return 'gone';
+  if (procStart && match.procStart && match.procStart !== procStart) return 'gone';
+  if (pid !== null && match.pid !== pid) return 'gone';
+  return 'alive';
+}
+
+/** Convenience boolean for callers that cannot act on `unknown`. */
 export function sessionStillRunning(
   sessionId: string,
   procStart: string | null,
   dir = claudeSessionsDir(),
   isAlive: (pid: number) => boolean = pidAlive,
 ): boolean {
-  const match = readSessionFiles(dir).find((s) => s.sessionId === sessionId);
-  if (!match) return false;
-  if (!isAlive(match.pid)) return false;
-  if (procStart && match.procStart && match.procStart !== procStart) return false;
-  return true;
+  return checkSessionLiveness(sessionId, procStart, null, dir, isAlive) === 'alive';
 }

@@ -8,12 +8,15 @@
  *   2. continue interrupted work in the terminal it was interrupted in.
  */
 
+import fs from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { Command } from 'commander';
 import { runWrap } from './commands/wrap.js';
 import { runDaemon } from './commands/daemon.js';
 import { runStatus } from './commands/status.js';
 import { runPause, runResume } from './commands/pause.js';
-import { runSetup, runShimInfo } from './commands/setup.js';
+import { runSetup, runShimInfo, runUninstall } from './commands/setup.js';
 import { runDoctor } from './commands/doctor.js';
 import { readLog } from '../logger/index.js';
 import {
@@ -24,12 +27,25 @@ import {
   type Config,
 } from '../config/index.js';
 
+/** Single source of truth for the version, so it cannot drift. */
+function version(): string {
+  try {
+    const here = path.dirname(fileURLToPath(import.meta.url));
+    const pkg = JSON.parse(
+      fs.readFileSync(path.resolve(here, '..', '..', 'package.json'), 'utf8'),
+    ) as { version?: string };
+    return pkg.version ?? '0.0.0';
+  } catch {
+    return '0.0.0';
+  }
+}
+
 const program = new Command();
 
 program
   .name('ckm')
   .description('Keep a Claude Code usage window running, and continue interrupted work in place.')
-  .version('0.1.0');
+  .version(version());
 
 program
   .command('setup')
@@ -37,6 +53,13 @@ program
   .option('--claim', 'also enable idle boundary claiming (spends quota with no task behind it)')
   .action((opts: { claim?: boolean }) => {
     process.exitCode = runSetup(opts);
+  });
+
+program
+  .command('uninstall')
+  .description('remove the shim and the service unit')
+  .action(() => {
+    process.exitCode = runUninstall();
   });
 
 program
@@ -51,17 +74,17 @@ program
   .description('stop auto-continuing (this session by default)')
   .option('--all', 'pause everything, including boundary claiming')
   .option('--session <id>', 'target a specific session id')
-  .action((opts: { all?: boolean; session?: string }) => {
-    process.exitCode = runPause(opts);
+  .action(async (opts: { all?: boolean; session?: string }) => {
+    process.exitCode = await runPause(opts);
   });
 
 program
   .command('resume')
-  .description('re-enable after a pause')
+  .description('re-enable after a pause, and clear a halt')
   .option('--all', 'resume everything')
   .option('--session <id>', 'target a specific session id')
-  .action((opts: { all?: boolean; session?: string }) => {
-    process.exitCode = runResume(opts);
+  .action(async (opts: { all?: boolean; session?: string }) => {
+    process.exitCode = await runResume(opts);
   });
 
 program
@@ -158,7 +181,12 @@ program
   .allowUnknownOption(true)
   .argument('[args...]', 'arguments passed through to claude')
   .action(async (args: string[]) => {
-    process.exitCode = await runWrap(args ?? []);
+    const code = await runWrap(args ?? []);
+    // node-pty leaves live handles behind, so a natural exit never arrives and
+    // the user's terminal would hang after quitting Claude Code. Leave
+    // deliberately, with the child's own exit code.
+    process.stdout.write('');
+    process.exit(code);
   });
 
 program

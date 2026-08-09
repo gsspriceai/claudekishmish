@@ -6,13 +6,15 @@
  * `--teleport`, `claude agents`) starts a new process, and Claude Code's own
  * daemon IPC is undocumented and version-fragile.
  *
- * `node-pty` is a native module and an optional dependency. When it is missing
- * we still run, still supervise, and still claim boundaries — we just say
- * plainly that in-place continuation is unavailable. Install never hard-fails
- * over it.
+ * `node-pty` is a native module and an optional dependency. It is loaded
+ * through a non-literal specifier so that TypeScript never tries to resolve it
+ * at build time — otherwise `npm ci --omit=optional` cannot compile the project
+ * at all. When it is missing we still run, still supervise, and still claim
+ * boundaries; we just say plainly that in-place continuation is unavailable.
  */
 
 import { spawn as spawnChild, type ChildProcess } from 'node:child_process';
+import { toLaunchable } from '../claude/spawn.js';
 
 export interface PtySession {
   /** PID of the spawned `claude`. */
@@ -27,20 +29,6 @@ export interface PtySession {
   kill(): void;
 }
 
-interface NodePtyModule {
-  spawn(
-    file: string,
-    args: string[],
-    options: {
-      name?: string;
-      cols?: number;
-      rows?: number;
-      cwd?: string;
-      env?: Record<string, string>;
-    },
-  ): NodePtyProcess;
-}
-
 interface NodePtyProcess {
   pid: number;
   write(data: string): void;
@@ -50,24 +38,28 @@ interface NodePtyProcess {
   onExit(cb: (e: { exitCode: number }) => void): void;
 }
 
+interface NodePtyModule {
+  spawn(file: string, args: string[], options: Record<string, unknown>): NodePtyProcess;
+}
+
 /** Load node-pty if it is installed and loadable on this platform. */
 export async function loadNodePty(): Promise<NodePtyModule | null> {
+  // Non-literal on purpose: keeps the optional dependency out of type resolution.
+  const specifier = 'node-pty';
   try {
-    const mod = (await import('node-pty')) as unknown as NodePtyModule & { default?: NodePtyModule };
+    const mod = (await import(specifier)) as { default?: NodePtyModule } & NodePtyModule;
     return mod.default ?? mod;
   } catch {
     return null;
   }
 }
 
-function stringEnv(): Record<string, string> {
+function childEnv(extra: Record<string, string>): Record<string, string> {
   const out: Record<string, string> = {};
   for (const [k, v] of Object.entries(process.env)) {
     if (typeof v === 'string') out[k] = v;
   }
-  // Lets a nested `claude` know it is already under supervision.
-  out.CKM_SUPERVISED = '1';
-  return out;
+  return { ...out, ...extra };
 }
 
 /**
@@ -75,14 +67,18 @@ function stringEnv(): Record<string, string> {
  *
  * The parent's stdin is switched to raw mode so the child sees keystrokes
  * exactly as it would if it had been launched directly — arrow keys, Ctrl-C,
- * bracketed paste and the TUI's own redraws all behave normally.
+ * bracketed paste and the TUI's own redraws all behave normally. Every listener
+ * and mode change is undone on exit, so the caller's process can actually
+ * terminate afterwards.
  */
 export async function spawnPty(
   bin: string,
   args: string[],
   cwd: string,
+  extraEnv: Record<string, string> = {},
 ): Promise<PtySession> {
   const pty = await loadNodePty();
+  const env = childEnv(extraEnv);
 
   if (pty) {
     const proc = pty.spawn(bin, args, {
@@ -90,7 +86,8 @@ export async function spawnPty(
       cols: process.stdout.columns ?? 80,
       rows: process.stdout.rows ?? 30,
       cwd,
-      env: stringEnv(),
+      env,
+      useConpty: process.platform === 'win32' ? undefined : false,
     });
 
     const dataHandlers: ((chunk: string) => void)[] = [];
@@ -102,6 +99,7 @@ export async function spawnPty(
     });
 
     const onStdin = (buf: Buffer) => proc.write(buf.toString('utf8'));
+    const wasRaw = process.stdin.isTTY ? process.stdin.isRaw : false;
     if (process.stdin.isTTY) process.stdin.setRawMode(true);
     process.stdin.resume();
     process.stdin.on('data', onStdin);
@@ -112,7 +110,7 @@ export async function spawnPty(
     proc.onExit(({ exitCode }) => {
       process.stdin.off('data', onStdin);
       process.stdout.off('resize', onResize);
-      if (process.stdin.isTTY) process.stdin.setRawMode(false);
+      if (process.stdin.isTTY) process.stdin.setRawMode(wasRaw);
       process.stdin.pause();
       for (const h of exitHandlers) h(exitCode);
     });
@@ -132,16 +130,21 @@ export async function spawnPty(
   }
 
   // Degraded path: inherit stdio directly. The session behaves exactly as normal
-  // and we still supervise it through the transcript, but we cannot type into it.
-  const child: ChildProcess = spawnChild(bin, args, {
+  // and we still supervise it through the transcript, but we cannot type into
+  // it. `toLaunchable` keeps a Windows batch shim from failing with EINVAL.
+  const { file, prefixArgs } = toLaunchable(bin);
+  const child: ChildProcess = spawnChild(file, [...prefixArgs, ...args], {
     cwd,
     stdio: 'inherit',
-    env: stringEnv(),
+    env,
   });
 
   const exitHandlers: ((code: number) => void)[] = [];
   child.on('exit', (code) => {
     for (const h of exitHandlers) h(code ?? 0);
+  });
+  child.on('error', () => {
+    for (const h of exitHandlers) h(127);
   });
 
   return {

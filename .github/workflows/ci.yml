@@ -47,8 +47,9 @@ jobs:
           node-version: '22'
           cache: npm
 
-      # node-pty is optional. Installing without it must still produce a working
-      # tool, so this job proves the degraded path is not broken.
+      # node-pty is optional, and the build must not need it. This job exists
+      # because the project once failed to compile at all without it (TS2307),
+      # which made the whole degraded path unreachable.
       - name: Install without optional dependencies
         run: npm ci --omit=optional
 
@@ -56,7 +57,33 @@ jobs:
         run: npm run build
 
       - name: Unit tests still pass
-        run: npx vitest run --exclude test/integration.test.ts
+        run: npx vitest run --exclude 'test/integration.test.ts'
 
       - name: Doctor reports the degraded mode instead of crashing
         run: node dist/cli/index.js doctor || true
+
+  package:
+    name: publishable tarball
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+
+      # `dist/` is gitignored, so a tarball built without a prior build would
+      # ship a `bin` pointing at nothing.
+      - name: Pack and verify the entry point is present
+        run: |
+          npm pack --silent
+          tar -tzf claudekishmish-*.tgz | grep -q 'package/dist/cli/index.js'
+          tar -tzf claudekishmish-*.tgz | grep -q 'package/scripts/verify-against-real-history.mjs'
+
+      - name: Installed CLI runs
+        run: |
+          npm i -g ./claudekishmish-*.tgz
+          ckm --version
+          ckm shim

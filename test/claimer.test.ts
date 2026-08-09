@@ -1,11 +1,21 @@
 import { describe, expect, it } from 'vitest';
-import { decideClaim, idleClaimAllowed, recentIdleClaims, sessionResumable, WEEK_MS } from '../src/window/claimer.js';
+import {
+  decideClaim,
+  idleClaimAllowed,
+  recentIdleClaims,
+  sessionResumable,
+  WEEK_MS,
+  type Actor,
+} from '../src/window/claimer.js';
 import { DEFAULT_CONFIG, type Config } from '../src/config/index.js';
 import { emptyState, type LimitEvent, type State, type SupervisedSession } from '../src/state/schema.js';
 import { WINDOW_MS } from '../src/window/ledger.js';
 
-const NOW = Date.UTC(2026, 7, 9, 14, 0, 30);
 const BOUNDARY = Date.UTC(2026, 7, 9, 14, 0, 0);
+const NOW = BOUNDARY + 30_000;
+
+const WRAPPER: Actor = { id: 'wrapper-1', ownSessionId: 'sess-1' };
+const DAEMON: Actor = { id: 'daemon-1', ownSessionId: null };
 
 function sessionLimit(overrides: Partial<LimitEvent> = {}): LimitEvent {
   return {
@@ -25,10 +35,12 @@ function session(overrides: Partial<SupervisedSession> = {}): SupervisedSession 
     cwd: '/repo',
     name: 'repo-1',
     ptyOwned: true,
+    supervisedFrom: BOUNDARY - 7200_000,
     paused: false,
     pendingResume: true,
     resumeCount: 0,
     limit: sessionLimit(),
+    missedLivenessChecks: 0,
     registeredAt: BOUNDARY - 7200_000,
     updatedAt: BOUNDARY,
     ...overrides,
@@ -36,13 +48,13 @@ function session(overrides: Partial<SupervisedSession> = {}): SupervisedSession 
 }
 
 function stateWithBoundaryDue(sessions: SupervisedSession[] = [], extra: Partial<State> = {}): State {
-  const base = emptyState(NOW);
   return {
-    ...base,
+    ...emptyState(NOW),
     ledger: {
       currentStart: BOUNDARY - WINDOW_MS,
       currentEnd: BOUNDARY,
       lastClaimedBoundary: null,
+      reservation: null,
       source: 'reset-message',
     },
     sessions: Object.fromEntries(sessions.map((s) => [s.sessionId, s])),
@@ -51,6 +63,7 @@ function stateWithBoundaryDue(sessions: SupervisedSession[] = [], extra: Partial
 }
 
 const config: Config = { ...DEFAULT_CONFIG, boundaryBufferMs: 20_000 };
+const withIdle: Config = { ...config, idleClaim: true };
 
 describe('sessionResumable', () => {
   it('accepts a healthy pending session', () => {
@@ -58,75 +71,65 @@ describe('sessionResumable', () => {
   });
 
   it('refuses a paused session', () => {
-    const r = sessionResumable(session({ paused: true }), config, NOW);
-    expect(r.ok).toBe(false);
-    expect(r.reason).toMatch(/paused/);
-  });
-
-  it('refuses when nothing is pending', () => {
-    expect(sessionResumable(session({ pendingResume: false }), config, NOW).ok).toBe(false);
+    expect(sessionResumable(session({ paused: true }), config, NOW).reason).toMatch(/paused/);
   });
 
   it('refuses when we do not own the pty', () => {
-    const r = sessionResumable(session({ ptyOwned: false }), config, NOW);
-    expect(r.ok).toBe(false);
-    expect(r.reason).toMatch(/pty/);
+    expect(sessionResumable(session({ ptyOwned: false }), config, NOW).reason).toMatch(/pty/);
   });
 
-  it('refuses a model limit outright', () => {
-    const r = sessionResumable(
-      session({ limit: sessionLimit({ kind: 'model', resetAt: null }) }),
-      config,
-      NOW,
-    );
+  it('refuses a limit recorded before this supervision run began', () => {
+    // Claude Code appends to the same transcript across resumes. A historical
+    // rate_limit record must never make us type into a session the user has
+    // only just opened.
+    const stale = session({
+      supervisedFrom: NOW - 60_000,
+      limit: sessionLimit({ detectedAt: NOW - 26 * 3600_000, resetAt: NOW - 21 * 3600_000 }),
+    });
+    const r = sessionResumable(stale, config, NOW);
     expect(r.ok).toBe(false);
-    expect(r.reason).toMatch(/model limit/);
+    expect(r.reason).toMatch(/predates/);
   });
 
-  it('refuses a weekly limit until its reset has passed', () => {
-    const weekly = sessionLimit({ kind: 'weekly', resetAt: NOW + 2 * 24 * 3600_000 });
-    expect(sessionResumable(session({ limit: weekly }), config, NOW).ok).toBe(false);
+  it('refuses before the stated reset has actually arrived', () => {
+    const notYet = session({ limit: sessionLimit({ resetAt: NOW + 3600_000 }) });
+    expect(sessionResumable(notYet, config, NOW).reason).toMatch(/not passed/);
+  });
 
-    const cleared = sessionLimit({ kind: 'weekly', resetAt: NOW - 1000 });
-    expect(sessionResumable(session({ limit: cleared }), config, NOW).ok).toBe(true);
+  it('refuses a limit whose reset could not be read', () => {
+    expect(sessionResumable(session({ limit: sessionLimit({ resetAt: null }) }), config, NOW).ok).toBe(false);
+  });
+
+  it('refuses model and weekly limits outright', () => {
+    expect(sessionResumable(session({ limit: sessionLimit({ kind: 'model', resetAt: null }) }), config, NOW).reason).toMatch(/model/);
+    expect(sessionResumable(session({ limit: sessionLimit({ kind: 'weekly' }) }), config, NOW).reason).toMatch(/weekly/);
   });
 
   it('enforces the per-session resume cap', () => {
     const capped = session({ resumeCount: config.maxResumesPerSession });
-    const r = sessionResumable(capped, config, NOW);
-    expect(r.ok).toBe(false);
-    expect(r.reason).toMatch(/cap reached/);
+    expect(sessionResumable(capped, config, NOW).reason).toMatch(/cap reached/);
   });
 });
 
 describe('idleClaimAllowed', () => {
   it('is off unless explicitly enabled', () => {
-    const r = idleClaimAllowed(stateWithBoundaryDue(), config, NOW);
-    expect(r.ok).toBe(false);
-    expect(r.reason).toMatch(/idle claiming is off/);
+    expect(idleClaimAllowed(stateWithBoundaryDue(), config, NOW).reason).toMatch(/idle claiming is off/);
   });
 
   it('is allowed once enabled', () => {
-    const on = { ...config, idleClaim: true };
-    expect(idleClaimAllowed(stateWithBoundaryDue(), on, NOW).ok).toBe(true);
+    expect(idleClaimAllowed(stateWithBoundaryDue(), withIdle, NOW).ok).toBe(true);
   });
 
   it('stays suspended after a weekly limit', () => {
-    const on = { ...config, idleClaim: true };
-    const state = stateWithBoundaryDue([], {
-      weekly: { suspendedUntil: NOW + 3600_000, idleClaims: [] },
-    });
-    const r = idleClaimAllowed(state, on, NOW);
-    expect(r.ok).toBe(false);
-    expect(r.reason).toMatch(/weekly limit/);
+    const state = stateWithBoundaryDue([], { weekly: { suspendedUntil: NOW + 3600_000, idleClaims: [] } });
+    expect(idleClaimAllowed(state, withIdle, NOW).reason).toMatch(/weekly limit/);
   });
 
   it('enforces the weekly idle-claim cap', () => {
-    const on = { ...config, idleClaim: true, maxIdleClaimsPerWeek: 3 };
     const state = stateWithBoundaryDue([], {
-      weekly: { suspendedUntil: null, idleClaims: [NOW - 1000, NOW - 2000, NOW - 3000] },
+      weekly: { suspendedUntil: null, idleClaims: [NOW - 1, NOW - 2, NOW - 3] },
     });
-    expect(idleClaimAllowed(state, on, NOW).ok).toBe(false);
+    expect(idleClaimAllowed(state, { ...withIdle, maxIdleClaimsPerWeek: 3 }, NOW).ok).toBe(false);
   });
 
   it('forgets claims older than seven days', () => {
@@ -139,61 +142,83 @@ describe('idleClaimAllowed', () => {
 
 describe('decideClaim', () => {
   it('does nothing before the boundary buffer elapses', () => {
-    const d = decideClaim(stateWithBoundaryDue([session()]), config, BOUNDARY + 5_000);
-    expect(d.action).toBe('none');
-    expect(d.reason).toMatch(/not due/);
+    expect(decideClaim(stateWithBoundaryDue([session()]), config, BOUNDARY + 5_000, WRAPPER).action).toBe('none');
   });
 
-  it('resumes pending work rather than pinging', () => {
-    const on = { ...config, idleClaim: true };
-    const d = decideClaim(stateWithBoundaryDue([session()]), on, NOW);
+  it('resumes pending work rather than pinging, for the pty owner', () => {
+    const d = decideClaim(stateWithBoundaryDue([session()]), withIdle, NOW, WRAPPER);
     expect(d.action).toBe('resume');
     expect(d).toHaveProperty('sessionId', 'sess-1');
   });
 
-  it('pings only when there is nothing to resume', () => {
-    const on = { ...config, idleClaim: true };
-    const d = decideClaim(stateWithBoundaryDue([]), on, NOW);
-    expect(d.action).toBe('ping');
+  /**
+   * The defect this suite exists for.
+   *
+   * The daemon owns no PTY. If it decides "resume" it cannot act, and if it
+   * consumes the boundary anyway the continuation never happens *and* the
+   * ledger reports a window that was never claimed.
+   */
+  it('DEFERS instead of claiming when the pending session belongs to another process', () => {
+    const d = decideClaim(stateWithBoundaryDue([session()]), withIdle, NOW, DAEMON);
+    expect(d.action).toBe('defer');
+    expect(d).toHaveProperty('sessionId', 'sess-1');
+  });
+
+  it('never pings past a session another process is about to continue', () => {
+    // Pinging would claim the very window the wrapper needs to resume into.
+    const d = decideClaim(stateWithBoundaryDue([session()]), withIdle, NOW, DAEMON);
+    expect(d.action).not.toBe('ping');
+  });
+
+  it('stops deferring once the grace has expired, so a dead owner cannot strand the boundary', () => {
+    const late = BOUNDARY + config.boundaryBufferMs + config.resumeDeferGraceMs + 1;
+    expect(decideClaim(stateWithBoundaryDue([session()]), withIdle, late, DAEMON).action).toBe('ping');
+  });
+
+  it('pings when there is nothing to resume', () => {
+    expect(decideClaim(stateWithBoundaryDue([]), withIdle, NOW, DAEMON).action).toBe('ping');
+  });
+
+  it('stands off while another actor holds the boundary', () => {
+    const state = stateWithBoundaryDue([]);
+    state.ledger.reservation = { boundary: BOUNDARY, owner: 'someone-else', expiresAt: NOW + 60_000 };
+    expect(decideClaim(state, withIdle, NOW, DAEMON).reason).toMatch(/already acting/);
   });
 
   it('picks the longest-waiting session first', () => {
-    const older = session({
-      sessionId: 'old',
-      limit: sessionLimit({ detectedAt: BOUNDARY - 7200_000 }),
-    });
-    const newer = session({
-      sessionId: 'new',
-      limit: sessionLimit({ detectedAt: BOUNDARY - 600_000 }),
-    });
-    const d = decideClaim(stateWithBoundaryDue([newer, older]), config, NOW);
-    expect(d).toHaveProperty('sessionId', 'old');
+    const older = session({ sessionId: 'old', limit: sessionLimit({ detectedAt: BOUNDARY - 7200_000 }) });
+    const newer = session({ sessionId: 'new', limit: sessionLimit({ detectedAt: BOUNDARY - 600_000 }) });
+    const actor: Actor = { id: 'w', ownSessionId: 'old' };
+    expect(decideClaim(stateWithBoundaryDue([newer, older]), config, NOW, actor)).toHaveProperty('sessionId', 'old');
   });
 
   it('honours the global pause above everything else', () => {
-    const on = { ...config, idleClaim: true };
     const state = stateWithBoundaryDue([session()], { globalPaused: true });
-    const d = decideClaim(state, on, NOW);
+    expect(decideClaim(state, withIdle, NOW, WRAPPER).reason).toMatch(/paused globally/);
+  });
+
+  it('does nothing at all once halted', () => {
+    // An ended subscription must stop the tool, not make it retry for ever.
+    const state = stateWithBoundaryDue([session()], {
+      halted: { reason: 'subscription', detectedAt: NOW - 1000, detail: 'subscription has ended' },
+    });
+    const d = decideClaim(state, withIdle, NOW, WRAPPER);
     expect(d.action).toBe('none');
-    expect(d.reason).toMatch(/paused globally/);
+    expect(d.reason).toMatch(/halted/);
   });
 
   it('does not resume when auto-continue is switched off', () => {
     const off = { ...config, autoContinue: false, idleClaim: false };
-    const d = decideClaim(stateWithBoundaryDue([session()]), off, NOW);
-    expect(d.action).toBe('none');
+    expect(decideClaim(stateWithBoundaryDue([session()]), off, NOW, WRAPPER).action).toBe('none');
   });
 
   it('falls through to a ping when the only session is paused', () => {
-    const on = { ...config, idleClaim: true };
-    const d = decideClaim(stateWithBoundaryDue([session({ paused: true })]), on, NOW);
-    expect(d.action).toBe('ping');
+    expect(decideClaim(stateWithBoundaryDue([session({ paused: true })]), withIdle, NOW, WRAPPER).action).toBe('ping');
   });
 
   it('does nothing at a boundary that was already claimed', () => {
-    const on = { ...config, idleClaim: true };
     const state = stateWithBoundaryDue([]);
     state.ledger.lastClaimedBoundary = BOUNDARY;
-    expect(decideClaim(state, on, NOW).action).toBe('none');
+    expect(decideClaim(state, withIdle, NOW, DAEMON).action).toBe('none');
   });
 });

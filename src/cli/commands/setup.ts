@@ -1,22 +1,20 @@
 /**
- * `ckm setup` — one command to get running, and it tells you exactly what it did.
+ * `ckm setup` and `ckm uninstall`.
  *
- * Nothing here is silent and nothing here needs admin rights. The two steps that
- * change the user's environment (adding the shim to PATH, activating the
- * background service) are printed for the user to run, not executed behind their
- * back.
+ * Nothing here needs admin rights, and the two steps that change the user's
+ * environment (putting the shim on PATH, starting the background service) are
+ * printed for the user to run rather than executed behind their back.
  */
 
-import { installShim, planShim, shimOnPath } from '../../platform/shell.js';
-import { planService, writeServiceUnit } from '../../platform/service.js';
+import { installShim, planShim, shimTakesPrecedence, uninstallShim } from '../../platform/shell.js';
+import { removeServiceUnit, writeServiceUnit } from '../../platform/service.js';
 import { loadConfig, saveConfig } from '../../config/index.js';
 import { locateClaude } from '../../claude/locate.js';
+import { spawnClaudeSync } from '../../claude/spawn.js';
 import { logInfo } from '../../logger/index.js';
 
 export function runSetup(opts: { claim?: boolean } = {}): number {
-  const out: string[] = [];
-  out.push('claudekishmish setup');
-  out.push('');
+  const out: string[] = ['claudekishmish setup', ''];
 
   const claude = locateClaude();
   if (!claude) {
@@ -25,7 +23,22 @@ export function runSetup(opts: { claim?: boolean } = {}): number {
     );
     return 1;
   }
+
+  // Prove it can actually be executed, not merely that the file exists.
+  const probe = spawnClaudeSync(claude, ['--version'], {
+    encoding: 'utf8',
+    timeout: 30_000,
+    windowsHide: true,
+  });
+  if (probe.status !== 0) {
+    process.stderr.write(
+      `Found ${claude} but could not run it: ${probe.error?.message ?? `exit ${probe.status}`}\n` +
+        'Set CKM_CLAUDE_BIN to the real executable and re-run `ckm setup`.\n',
+    );
+    return 1;
+  }
   out.push(`  Found Claude Code   ${claude}`);
+  out.push(`                      ${`${probe.stdout ?? ''}`.trim().split('\n')[0] ?? ''}`);
 
   const shim = installShim();
   out.push(`  Installed shim      ${shim.dir}`);
@@ -34,21 +47,24 @@ export function runSetup(opts: { claim?: boolean } = {}): number {
   if (service.unitPath) out.push(`  Wrote service unit  ${service.unitPath}`);
 
   if (opts.claim) {
-    const config = loadConfig();
-    saveConfig({ ...config, idleClaim: true });
+    saveConfig({ ...loadConfig(), idleClaim: true });
     out.push('  Idle claiming       enabled');
   }
 
   out.push('');
   out.push('  Two steps left — run these yourself:');
   out.push('');
-  if (!shimOnPath()) {
-    out.push(`  1. Put the shim first on PATH. Add to ${shim.profileHint}:`);
+  if (!shimTakesPrecedence()) {
+    out.push(`  1. Put the shim FIRST on PATH. Add to ${shim.profileHint}:`);
     out.push('');
     out.push(`         ${shim.pathLine}`);
+    for (const alt of shim.alternatives) {
+      out.push(`     ${alt.shell}:`);
+      out.push(`         ${alt.line}`);
+    }
     out.push('');
   } else {
-    out.push('  1. Shim is already on PATH.');
+    out.push('  1. Shim is already first on PATH.');
     out.push('');
   }
   out.push('  2. Start the background claimer:');
@@ -62,23 +78,64 @@ export function runSetup(opts: { claim?: boolean } = {}): number {
   out.push('  Defaults: auto-continue ON, idle claiming OFF.');
   out.push('  Idle claiming spends quota with no task behind it, so turn it on');
   out.push('  deliberately with `ckm claim on` once you have read what it does.');
+  out.push('');
+  out.push('  To undo everything: `ckm uninstall`');
 
   logInfo('setup.completed', { shimDir: shim.dir, service: service.kind });
   process.stdout.write(out.join('\n') + '\n');
   return 0;
 }
 
-/** `ckm shim --print` for users who would rather wire PATH themselves. */
+/**
+ * Remove the shim and the service unit.
+ *
+ * This exists because the alternative is worse than untidy: a shim left on PATH
+ * after `npm uninstall -g` would intercept `claude` with nothing behind it. (The
+ * shims themselves also fall through to the real binary for exactly that case,
+ * but the user should still have a clean way out.)
+ */
+export function runUninstall(): number {
+  const { removed, dir } = uninstallShim();
+  const unit = removeServiceUnit();
+  const plan = planShim();
+
+  const out: string[] = ['claudekishmish uninstall', ''];
+  out.push(removed.length > 0 ? `  Removed shim        ${dir}` : '  Shim                already absent');
+  out.push(unit ? `  Removed service     ${unit}` : '  Service unit        already absent');
+  out.push('');
+  out.push('  Still to do by hand:');
+  out.push(`    - remove this line from ${plan.profileHint}:`);
+  out.push(`          ${plan.pathLine}`);
+  if (process.platform === 'linux') {
+    out.push('    - systemctl --user disable --now claudekishmish.service');
+  }
+  if (process.platform === 'darwin') {
+    out.push('    - launchctl bootout gui/$UID/com.claudekishmish.daemon');
+  }
+  out.push('');
+  out.push('  Your state and logs are untouched. Delete them with:');
+  out.push(`      rm -rf ${dirOf(dir)}`);
+  out.push('');
+
+  logInfo('uninstall.completed', { removed: removed.length, unit });
+  process.stdout.write(out.join('\n') + '\n');
+  return 0;
+}
+
+function dirOf(shimDirPath: string): string {
+  return shimDirPath.replace(/[\\/]shim$/, '');
+}
+
+/** `ckm shim` for users who would rather wire PATH themselves. */
 export function runShimInfo(): number {
   const plan = planShim();
-  process.stdout.write(
-    [
-      `shim directory : ${plan.dir}`,
-      `on PATH        : ${shimOnPath() ? 'yes' : 'no'}`,
-      `PATH line      : ${plan.pathLine}`,
-      `profile        : ${plan.profileHint}`,
-      '',
-    ].join('\n'),
-  );
+  const lines = [
+    `shim directory : ${plan.dir}`,
+    `first on PATH  : ${shimTakesPrecedence() ? 'yes' : 'no'}`,
+    `PATH line      : ${plan.pathLine}`,
+    `profile        : ${plan.profileHint}`,
+  ];
+  for (const alt of plan.alternatives) lines.push(`${alt.shell.padEnd(15)}: ${alt.line}`);
+  process.stdout.write(lines.join('\n') + '\n');
   return 0;
 }

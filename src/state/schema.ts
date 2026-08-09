@@ -36,6 +36,12 @@ export interface SupervisedSession {
   name: string;
   /** True when this process owns the session's PTY and can inject input. */
   ptyOwned: boolean;
+  /**
+   * When this supervisor took charge. Limits recorded *before* this are history
+   * belonging to an earlier run of the same session id — acting on them would
+   * type into a terminal the user just opened.
+   */
+  supervisedFrom: number;
   /** Per-session kill switch, set by `ckm pause`. */
   paused: boolean;
   /** Waiting on a boundary to continue. */
@@ -43,8 +49,28 @@ export interface SupervisedSession {
   /** How many times we have auto-continued this session. Capped. */
   resumeCount: number;
   limit: LimitEvent | null;
+  /**
+   * Consecutive liveness checks that failed. A session descriptor is rewritten
+   * constantly by Claude Code, so a single unreadable read is normal and must
+   * not unsupervise a live session.
+   */
+  missedLivenessChecks: number;
   registeredAt: number;
   updatedAt: number;
+}
+
+/**
+ * A boundary held by one actor while it tries to act on it.
+ *
+ * Reserving is not claiming. A reservation is released if the actor cannot act
+ * or fails, so a boundary is never consumed by something that did not send a
+ * request. Expiry covers the actor dying mid-attempt.
+ */
+export interface BoundaryReservation {
+  boundary: number;
+  /** Identifies the reserving process; only the owner may convert or release. */
+  owner: string;
+  expiresAt: number;
 }
 
 /** What we believe about the current usage window. */
@@ -54,10 +80,12 @@ export interface WindowLedger {
   /** Epoch ms of the current window's end. */
   currentEnd: number | null;
   /**
-   * The last boundary we claimed. Makes claiming idempotent when the daemon and
-   * a wrapper race for the same boundary.
+   * The last boundary actually claimed by a request that landed. Makes claiming
+   * idempotent when the daemon and a wrapper race for the same boundary.
    */
   lastClaimedBoundary: number | null;
+  /** In-flight attempt on the next boundary, if any. */
+  reservation: BoundaryReservation | null;
   /** Where `currentEnd` came from; a server-stated reset outranks our own math. */
   source: 'computed' | 'reset-message' | 'claim' | null;
 }
@@ -70,6 +98,20 @@ export interface WeeklyState {
   idleClaims: number[];
 }
 
+/**
+ * A stop that retrying cannot clear.
+ *
+ * If the account is logged out, the subscription has ended, or the credentials
+ * are rejected, every future request will fail the same way. Continuing to ping
+ * would be pointless noise, so the tool halts and says so until a human fixes
+ * it.
+ */
+export interface HaltState {
+  reason: 'auth' | 'subscription' | 'unknown';
+  detectedAt: number;
+  detail: string;
+}
+
 export interface State {
   version: 1;
   ledger: WindowLedger;
@@ -78,6 +120,8 @@ export interface State {
   weekly: WeeklyState;
   /** Global kill switch, set by `ckm pause --all`. */
   globalPaused: boolean;
+  /** Set when a terminal failure makes further requests futile. */
+  halted: HaltState | null;
   updatedAt: number;
 }
 
@@ -88,11 +132,13 @@ export function emptyState(now: number): State {
       currentStart: null,
       currentEnd: null,
       lastClaimedBoundary: null,
+      reservation: null,
       source: null,
     },
     sessions: {},
     weekly: { suspendedUntil: null, idleClaims: [] },
     globalPaused: false,
+    halted: null,
     updatedAt: now,
   };
 }

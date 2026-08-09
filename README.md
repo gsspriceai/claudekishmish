@@ -30,15 +30,13 @@ unclaimed.**
 
 | | |
 |---|---|
-| **Claims boundaries** | The moment a window expires, a minimal request starts the next countdown, so the clock never stops. Opt-in. |
-| **Continues your work** | When the window reopens, the continuation is typed into *your actual terminal session* — same window, same context, work carries on. |
-
-You wake up to the session you left, further along.
+| **Continues your work** | When the window reopens, the continuation is typed into *your actual terminal session* — same window, same context, work carries on. On by default. |
+| **Claims boundaries** | The moment a window expires, a minimal request starts the next countdown, so the clock never stops. **Off by default** — see the cost below. |
 
 ## Verified, not assumed
 
 The window model was derived from 90 real `rate_limit` records, then checked
-against 76,167 transcript records:
+against 76,000+ transcript records:
 
 ```
 windowStart = floor10(first message after the previous window expired)
@@ -57,7 +55,7 @@ Every reset time Claude Code has ever stated on that machine landed on a
 on your own history:
 
 ```bash
-node scripts/verify-against-real-history.mjs
+npm run verify:history        # or: node scripts/verify-against-real-history.mjs
 ```
 
 ## Three limits, three responses
@@ -71,6 +69,28 @@ wait-and-retry tools hang for days.
 | **Weekly** | `hit your weekly limit · resets Aug 6, 10:30pm` | parks it, suspends claiming, tells you |
 | **Per-model** | `reached your Fable 5 limit. Run /usage-credits` | stops cleanly and hands back — waiting cannot fix this one |
 
+And if the account itself cannot make requests — logged out, subscription ended,
+credentials rejected — the tool **halts** rather than retrying an impossible
+request several times a day for ever. `ckm status` says so in the first line, and
+`ckm resume --all` clears it once you have fixed it.
+
+## What a boundary claim costs
+
+Measured against a real subscription account:
+
+```
+input 2 · cache_read 21,963 · output 13 · ~5.6s      (~$0.023 at API rates)
+```
+
+The built-in tool schema dominates, and it is read from the prompt cache your
+normal sessions already populate. Restricting the tool set was measured too and
+is **worse** — it changes the prompt, misses the cache entirely, and costs about
+ten times more.
+
+So a claim is cheap, but it is not free, and it counts against your weekly
+budget. That is why idle claiming is **off** until you turn it on with
+`ckm claim on`, and why it is capped at 14 claims a week.
+
 ## Usage
 
 ```bash
@@ -78,37 +98,16 @@ ckm setup              # install the shim + write the service unit
 ckm status             # windows, boundaries, sessions, next action
 ckm pause              # stop auto-continuing this session
 ckm pause --all        # stop everything (before you go to sleep)
-ckm resume [--all]     # switch it back on
+ckm resume [--all]     # switch it back on; also clears a halt
 ckm claim on|off       # boundary claiming when nothing is pending
-ckm doctor             # check every dependency
-ckm logs               # what it did while you were away
+ckm doctor             # check every dependency, and actually run claude
+ckm logs [-n]          # what it did while you were away
+ckm config get|set     # settings
+ckm shim               # where the shim is, and how to put it on PATH
+ckm uninstall          # remove the shim and the service unit
 ```
 
 After `ckm setup`, use `claude` exactly as you always have. The shim wraps it.
-
-### `ckm status`
-
-```
-claudekishmish
-
-  Window
-    current ends   Aug 09, 07:30 PM   (reset-message)
-    next boundary  Aug 09, 07:30 PM   in 2h 14m
-    last claimed   Aug 09, 02:30 PM
-
-  Supervised sessions (1)
-    zlash-backend-26  (98399394)  pending-resume
-      cwd     E:\ZLASH BACKEND
-      resumes 0/3
-      limit   session — resets Aug 09, 07:30 PM
-
-  Policy
-    auto-continue  on
-    idle claiming  off   (0/14 used this week)
-    global pause   active
-
-  Next action    none — boundary not due
-```
 
 ## Safety
 
@@ -119,23 +118,27 @@ more than the features.
    you launched it with. It never adds `--dangerously-skip-permissions` and never
    widens `--permission-mode`.
 2. **Only sessions open in a terminal.** A session qualifies when it is
-   `kind: interactive`, its PID is alive, and its process-start stamp still
-   matches — so a recycled PID can never be mistaken for your session.
-3. **Fixed continuation text.** What gets typed comes from your config, never
+   `kind: interactive`, `entrypoint: cli`, its PID is alive, and its
+   process-start stamp still matches. Checked at registration *and* on every
+   liveness poll, so a recycled PID or a background agent can never be mistaken
+   for your terminal.
+3. **Only limits from this run.** A `rate_limit` record left in a reused
+   transcript is history, not a live interruption — acting on one would type
+   into a session you have only just opened.
+4. **Fixed continuation text.** What gets typed comes from your config, never
    from model output or transcript content. There is no path from something
    Claude wrote to keystrokes in your shell.
-4. **Hard caps.** Three auto-continues per session, fourteen idle claims per
-   week. Exceeding one stops supervision and says why.
-5. **Weekly backstop.** After a weekly cap is seen, claiming suspends until it
-   actually resets. The tool will not eat the budget it exists to protect.
-6. **Real kill switch.** `ckm pause` is re-checked on every tick *and* again in
+5. **A boundary is consumed only by a request that landed.** Actors *reserve* a
+   boundary, then convert it to a claim after the request succeeds, and release
+   it otherwise — so a failure can never burn a window while reporting a healthy
+   one.
+6. **Hard caps.** Three auto-continues per session, fourteen idle claims per
+   week, both enforced in one place.
+7. **Real kill switch.** `ckm pause` is re-checked on every tick *and* again in
    the instant before anything is typed.
-7. **Nothing leaves your machine.** No credentials are read, stored or
+8. **Nothing leaves your machine.** No credentials are read, stored or
    transmitted. No network calls except Claude Code's own.
-8. **Everything is logged** before it happens — `ckm logs`.
-
-**Idle claiming is off by default.** It spends quota with no task behind it, so
-it should be a deliberate choice: `ckm claim on`.
+9. **Everything is logged** before it happens — `ckm logs`.
 
 ## What it is not
 
@@ -153,8 +156,8 @@ pipes, and therefore no per-platform IPC to get wrong.
 | Role | Job |
 |---|---|
 | `ckm wrap` | PTY host. Runs the real `claude` in a pseudo-terminal, passthrough in both directions, types the continuation when the window reopens. |
-| `ckm daemon` | Owns the window ledger. Claims boundaries when no terminal is open. |
-| `ckm` | status, pause, resume, setup, doctor, logs. |
+| `ckm daemon` | Owns the window ledger. Claims boundaries when no terminal is open, and **defers** to the wrapper when the pending session belongs to it. |
+| `ckm` | status, pause, resume, setup, doctor, logs, uninstall. |
 
 Detection uses the authoritative transcript record, never screen-scraping:
 
@@ -165,28 +168,34 @@ Detection uses the authoritative transcript record, never screen-scraping:
     "text": "You've hit your session limit · resets 11:30pm (Asia/Calcutta)" }] } }
 ```
 
-A boundary is claimed **exactly once**: continuing pending work *is* the claim,
-and a ping is only sent when there is nothing to continue.
+Each tick observes outside the lock, decides inside it, and acts outside it
+again — so the shared state lock is never held across transcript I/O, and a
+wrapper pumping a live terminal is never blocked.
 
 ### `node-pty`
 
 Optional native dependency. If it will not build or load, install still succeeds
 and the tool still supervises and claims boundaries — it just reports that
 in-place continuation is unavailable. `ckm doctor` tells you which mode you are
-in.
+in. Note that **Linux has no prebuilt binary**: without python3/make/g++ you will
+land in the degraded mode.
 
 ## Development
 
 ```bash
 npm install
 npm run build
-npm test          # 106 tests
+npm test          # 179 tests
 ```
 
 Correctness lives in pure functions (`window/ledger.ts`, `window/claimer.ts`),
 tested without Claude, without a PTY and without a real clock. The integration
-test wraps a fake Claude that hits a limit on a compressed timescale, so the full
+tests wrap a fake Claude that hits a limit on a compressed timescale, so the full
 loop runs in seconds with no account and no network.
+
+The suite is mutation-checked: each fixed defect is reintroduced and the test
+written for it must go red. A test that still passes with the bug back in is not
+a test.
 
 ## Licence
 
