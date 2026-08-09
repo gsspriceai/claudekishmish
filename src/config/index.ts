@@ -2,12 +2,17 @@
  * User settings, their defaults, and the bounds that keep a hand-edited config
  * from turning the supervisor into a hazard.
  *
- * Defaults are chosen for safety, not for maximum effect:
+ * Both jobs are ON by default, which is the whole point of the tool: it should
+ * work after `ckm setup` without a second decision.
  *
- *   - `autoContinue` is ON. It continues work the user already started, in the
- *     terminal they started it in, with the permissions they already granted.
- *   - `idleClaim` is OFF. It spends quota with no user intent behind it, so it
- *     must be an explicit choice (`ckm claim on`).
+ *   - `autoContinue` continues work the user already started, in the terminal
+ *     they started it in, with the permissions they already granted.
+ *   - `idleClaim` sends a minimal request at a boundary that would otherwise
+ *     pass unclaimed. This one spends quota with no task behind it, so although
+ *     it is on, it is never silent: `ckm setup` says so, `ckm status` shows the
+ *     running count, every claim is logged before it happens, and the weekly cap
+ *     plus the weekly-limit suspension bound it from above. `ckm claim off`
+ *     turns it off outright.
  */
 
 import fs from 'node:fs';
@@ -16,7 +21,7 @@ import { configPath, ckmHome } from '../platform/paths.js';
 export interface Config {
   /** Continue a wrapped session when its window reopens. */
   autoContinue: boolean;
-  /** Send a minimal ping at an otherwise-unclaimed boundary. Opt-in. */
+  /** Send a minimal ping at an otherwise-unclaimed boundary. */
   idleClaim: boolean;
   /** Text typed into the session on resume. Fixed by config, never model-derived. */
   continuationText: string;
@@ -41,7 +46,7 @@ export interface Config {
 
 export const DEFAULT_CONFIG: Config = {
   autoContinue: true,
-  idleClaim: false,
+  idleClaim: true,
   continuationText: 'continue',
   pingText: 'ok',
   boundaryBufferMs: 20_000,

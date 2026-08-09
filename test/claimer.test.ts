@@ -62,7 +62,7 @@ function stateWithBoundaryDue(sessions: SupervisedSession[] = [], extra: Partial
   };
 }
 
-const config: Config = { ...DEFAULT_CONFIG, boundaryBufferMs: 20_000 };
+const config: Config = { ...DEFAULT_CONFIG, boundaryBufferMs: 20_000, idleClaim: false };
 const withIdle: Config = { ...config, idleClaim: true };
 
 describe('sessionResumable', () => {
@@ -112,7 +112,11 @@ describe('sessionResumable', () => {
 });
 
 describe('idleClaimAllowed', () => {
-  it('is off unless explicitly enabled', () => {
+  it('is on by default', () => {
+    expect(idleClaimAllowed(stateWithBoundaryDue(), DEFAULT_CONFIG, NOW).ok).toBe(true);
+  });
+
+  it('can be switched off outright', () => {
     expect(idleClaimAllowed(stateWithBoundaryDue(), config, NOW).reason).toMatch(/idle claiming is off/);
   });
 

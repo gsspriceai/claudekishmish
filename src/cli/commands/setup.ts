@@ -13,7 +13,7 @@ import { locateClaude } from '../../claude/locate.js';
 import { spawnClaudeSync } from '../../claude/spawn.js';
 import { logInfo } from '../../logger/index.js';
 
-export function runSetup(opts: { claim?: boolean } = {}): number {
+export function runSetup(opts: { noClaim?: boolean } = {}): number {
   const out: string[] = ['claudekishmish setup', ''];
 
   const claude = locateClaude();
@@ -46,10 +46,10 @@ export function runSetup(opts: { claim?: boolean } = {}): number {
   const service = writeServiceUnit();
   if (service.unitPath) out.push(`  Wrote service unit  ${service.unitPath}`);
 
-  if (opts.claim) {
-    saveConfig({ ...loadConfig(), idleClaim: true });
-    out.push('  Idle claiming       enabled');
+  if (opts.noClaim) {
+    saveConfig({ ...loadConfig(), idleClaim: false });
   }
+  const config = loadConfig();
 
   out.push('');
   out.push('  Two steps left — run these yourself:');
@@ -75,10 +75,18 @@ export function runSetup(opts: { claim?: boolean } = {}): number {
   out.push('');
   out.push('  Then open a new terminal and run `ckm status`.');
   out.push('');
-  out.push('  Defaults: auto-continue ON, idle claiming OFF.');
-  out.push('  Idle claiming spends quota with no task behind it, so turn it on');
-  out.push('  deliberately with `ckm claim on` once you have read what it does.');
+  out.push(`  Both jobs are ON:`);
+  out.push(`    auto-continue   ${config.autoContinue ? 'ON ' : 'off'}  continue interrupted work in its own terminal`);
+  out.push(`    window claiming ${config.idleClaim ? 'ON ' : 'off'}  keep the 5-hour countdown running`);
   out.push('');
+  if (config.idleClaim) {
+    // Spending quota with no task behind it must never be a surprise.
+    out.push('  Window claiming sends a real request at each boundary, so it does');
+    out.push(`  cost you: roughly 22k cached tokens (~$0.02) per claim, capped at`);
+    out.push(`  ${config.maxIdleClaimsPerWeek} a week, and suspended automatically if you hit a weekly limit.`);
+    out.push('  Turn it off with `ckm claim off`. Every claim is in `ckm logs`.');
+    out.push('');
+  }
   out.push('  To undo everything: `ckm uninstall`');
 
   logInfo('setup.completed', { shimDir: shim.dir, service: service.kind });

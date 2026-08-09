@@ -23,7 +23,14 @@ let ckmHome: string;
 let claudeHome: string;
 
 const SESSION_ID = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee';
-const config: Config = { ...DEFAULT_CONFIG, boundaryBufferMs: 0, resumeDeferGraceMs: 60_000 };
+// idleClaim is off here on purpose: these tests must never spawn a real
+// `claude` process, and the ping path is covered by ping.test.ts.
+const config: Config = {
+  ...DEFAULT_CONFIG,
+  boundaryBufferMs: 0,
+  resumeDeferGraceMs: 60_000,
+  idleClaim: false,
+};
 
 beforeEach(() => {
   ckmHome = fs.mkdtempSync(path.join(os.tmpdir(), 'ckm-sup-'));
@@ -184,7 +191,7 @@ describe('tick — two actors on one boundary', () => {
     expect(resumed).toHaveLength(1);
   });
 
-  it('a paused session is left alone, and idle claiming is off by default', async () => {
+  it('a paused session is left alone, and nothing else claims the boundary', async () => {
     await seedPendingSession();
     await mutateState((s) => ({
       ...s,

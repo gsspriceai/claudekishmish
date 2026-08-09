@@ -31,7 +31,7 @@ unclaimed.**
 | | |
 |---|---|
 | **Continues your work** | When the window reopens, the continuation is typed into *your actual terminal session* — same window, same context, work carries on. On by default. |
-| **Claims boundaries** | The moment a window expires, a minimal request starts the next countdown, so the clock never stops. **Off by default** — see the cost below. |
+| **Claims boundaries** | The moment a window expires, a minimal request starts the next countdown, so the clock never stops. On by default; capped, announced at setup, and every claim is logged. |
 
 ## Verified, not assumed
 
@@ -88,8 +88,11 @@ is **worse** — it changes the prompt, misses the cache entirely, and costs abo
 ten times more.
 
 So a claim is cheap, but it is not free, and it counts against your weekly
-budget. That is why idle claiming is **off** until you turn it on with
-`ckm claim on`, and why it is capped at 14 claims a week.
+budget. It is on by default because that is the point of the tool, but it is
+never silent: `ckm setup` says so in plain terms, `ckm status` shows the running
+count, every claim is logged before it happens, it is capped at 14 a week, and it
+suspends itself if you hit a weekly limit. `ckm claim off` stops it outright, and
+`ckm setup --no-claim` never starts it.
 
 ## Usage
 

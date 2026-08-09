@@ -10,10 +10,17 @@ describe('sanitiseConfig', () => {
     expect(sanitiseConfig({})).toEqual(DEFAULT_CONFIG);
   });
 
-  it('keeps idle claiming off by default', () => {
-    // It spends quota with no task behind it, so it must be a deliberate choice.
-    expect(DEFAULT_CONFIG.idleClaim).toBe(false);
+  it('has both jobs on by default', () => {
+    // The tool should work after `ckm setup` without a second decision. Idle
+    // claiming spends quota, so it is bounded by caps and announced loudly
+    // rather than being off.
     expect(DEFAULT_CONFIG.autoContinue).toBe(true);
+    expect(DEFAULT_CONFIG.idleClaim).toBe(true);
+  });
+
+  it('still bounds idle claiming from above', () => {
+    expect(DEFAULT_CONFIG.maxIdleClaimsPerWeek).toBeGreaterThan(0);
+    expect(DEFAULT_CONFIG.maxIdleClaimsPerWeek).toBeLessThanOrEqual(100);
   });
 
   it('clamps a negative boundary buffer to zero', () => {

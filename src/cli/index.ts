@@ -50,9 +50,10 @@ program
 program
   .command('setup')
   .description('install the shim and write the background service unit')
-  .option('--claim', 'also enable idle boundary claiming (spends quota with no task behind it)')
+  .option('--no-claim', 'set up without window claiming (it is on by default)')
   .action((opts: { claim?: boolean }) => {
-    process.exitCode = runSetup(opts);
+    // commander maps --no-claim to claim === false
+    process.exitCode = runSetup({ noClaim: opts.claim === false });
   });
 
 program
