@@ -82,6 +82,11 @@ Measured against a real subscription account:
 input 2 · cache_read 21,963 · output 13 · ~5.6s      (~$0.023 at API rates)
 ```
 
+A claim is a real, persisted session — it creates one transcript with one
+timestamped turn. That is deliberate: the window a claim opens is only visible
+through transcripts, and overnight there is no other session running, so a claim
+that persisted nothing would open a window nothing on the machine could see.
+
 The built-in tool schema dominates, and it is read from the prompt cache your
 normal sessions already populate. Restricting the tool set was measured too and
 is **worse** — it changes the prompt, misses the cache entirely, and costs about

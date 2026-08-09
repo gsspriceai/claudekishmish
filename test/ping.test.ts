@@ -22,11 +22,18 @@ describe('pingArgs', () => {
   });
 
   it('still trims the context that makes a request expensive', () => {
-    // No MCP servers, no skills, no session file, no default system prompt.
+    // No MCP servers, no skills, no default system prompt.
     expect(args).toContain('--strict-mcp-config');
     expect(args).toContain('--disable-slash-commands');
-    expect(args).toContain('--no-session-persistence');
     expect(args).toContain('--system-prompt');
+  });
+
+  it('persists the session, because the claim must leave a record', () => {
+    // The window a claim opens is only visible to us through transcripts.
+    // Overnight there is no other session running, so a claim that persisted
+    // nothing would open a window nothing on the machine could see, and a
+    // restarted daemon would bootstrap from stale history.
+    expect(args).not.toContain('--no-session-persistence');
   });
 
   it('asks for exactly one turn of plain text', () => {

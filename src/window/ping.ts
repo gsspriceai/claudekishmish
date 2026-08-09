@@ -41,17 +41,32 @@ export interface PingResult {
 }
 
 /**
- * The cheapest request that still anchors a window without breaking auth.
+ * The cheapest request that still starts a real session, without breaking auth.
  *
  * `--strict-mcp-config` with no `--mcp-config` loads zero MCP servers.
- * `--no-session-persistence` keeps the claim out of the transcript history.
  * `--system-prompt` replaces the full default prompt with a single character.
+ *
+ * ## Why the claim must be a persisted session
+ *
+ * `--no-session-persistence` was here at first, to keep these one-word claims
+ * out of the transcript history. That was wrong, and it broke the feature in
+ * precisely the case it exists for.
+ *
+ * A claim has to leave a record, because the window it opens is only visible to
+ * us through transcripts: `deriveLedgerFromTurns` reads user turns to work out
+ * where the current window starts. Overnight — the whole point of the daemon —
+ * there is no other session running, so a claim that persisted nothing would
+ * open a window that nothing on the machine could see. A restarted daemon would
+ * then bootstrap from stale history and be out of phase with reality.
+ *
+ * Verified: without the flag, one claim creates one session transcript
+ * containing one timestamped `user` turn (1074 -> 1075 transcripts), which is
+ * exactly what the ledger needs.
  */
 export function pingArgs(text: string): string[] {
   return [
     '--strict-mcp-config',
     '--disable-slash-commands',
-    '--no-session-persistence',
     '--system-prompt',
     '.',
     '--max-turns',
