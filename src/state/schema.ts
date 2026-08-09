@@ -37,6 +37,17 @@ export interface SupervisedSession {
   /** True when this process owns the session's PTY and can inject input. */
   ptyOwned: boolean;
   /**
+   * Claude Code's own view of the session, from its descriptor: `idle`, `busy`,
+   * `shell`. Only an idle session is a safe thing to nudge.
+   */
+  sessionStatus: string | null;
+  /**
+   * True when the user has typed something they have not submitted. Injecting
+   * then would append to their draft and press Enter, submitting a half-written
+   * message. Only the PTY owner can know this, so only it sets the flag.
+   */
+  hasDraftInput: boolean;
+  /**
    * When this supervisor took charge. Limits recorded *before* this are history
    * belonging to an earlier run of the same session id — acting on them would
    * type into a terminal the user just opened.

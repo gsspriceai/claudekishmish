@@ -22,6 +22,7 @@ import {
   ACTOR_ID,
   deregisterSession,
   registerSession,
+  reportDraftInput,
   stillEligible,
   tick,
 } from '../../supervisor/index.js';
@@ -134,13 +135,28 @@ export async function runWrap(args: string[]): Promise<number> {
     return outcome.ok;
   };
 
+  /** Claim the boundary through this already-open session, rather than a new one. */
+  const nudge = async (): Promise<boolean> => {
+    if (pty.hasDraftInput()) {
+      logInfo('nudge.skipped', { reason: 'user has an unsent draft' });
+      return false;
+    }
+    const outcome = await injectContinuation(pty, loadConfig().pingText);
+    if (!outcome.ok) logInfo('nudge.skipped', { reason: outcome.reason });
+    return outcome.ok;
+  };
+
   let ticking = false;
   let stopped = false;
   const loop = setInterval(() => {
     if (stopped || !sessionId || ticking) return;
     ticking = true;
-    // Re-read config every tick so `ckm config set` reaches a running wrapper.
-    void tick({ actor: { id: ACTOR_ID, ownSessionId: sessionId }, resume, config: loadConfig() })
+    const id = sessionId;
+    // Publish draft state before deciding: a nudge is chosen from shared state.
+    void reportDraftInput(id, pty.hasDraftInput())
+      .catch(() => undefined)
+      // Re-read config every tick so `ckm config set` reaches a running wrapper.
+      .then(() => tick({ actor: { id: ACTOR_ID, ownSessionId: id }, resume, nudge, config: loadConfig() }))
       .catch((err: Error) => logError('tick.failed', { message: err.message }))
       .finally(() => {
         ticking = false;

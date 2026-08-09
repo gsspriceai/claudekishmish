@@ -105,6 +105,7 @@ describe('state store', () => {
         `const id = 's' + process.argv[2];`,
         `await mutateState((s) => ({ ...s, sessions: { ...s.sessions, [id]: {`,
         `  sessionId: id, pid: 1, procStart: null, cwd: '/', name: id, ptyOwned: false,`,
+        `  sessionStatus: null, hasDraftInput: false,`,
         `  supervisedFrom: 0, paused: false, pendingResume: false, resumeCount: 0,`,
         `  limit: null, missedLivenessChecks: 0, registeredAt: 0, updatedAt: 0 } } }));`,
       ].join('\n'),

@@ -84,6 +84,8 @@ export function runStatus(): number {
       s.paused ? 'PAUSED' : null,
       s.pendingResume ? 'pending-resume' : null,
       s.ptyOwned ? null : 'no-pty',
+      s.sessionStatus ? s.sessionStatus : null,
+      s.hasDraftInput ? 'draft-unsent' : null,
     ].filter(Boolean);
     lines.push(`    ${s.name}  (${s.sessionId.slice(0, 8)})  ${flags.join(' ') || 'ok'}`);
     lines.push(`      cwd     ${s.cwd}`);

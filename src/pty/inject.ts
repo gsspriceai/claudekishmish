@@ -51,6 +51,14 @@ export async function injectContinuation(
     logWarn('inject.unsupported', { reason: 'node-pty unavailable' });
     return { ok: false, reason: 'in-place continuation needs node-pty' };
   }
+  // Re-checked here, at the last possible moment: the decision was made from
+  // state that may be seconds old, and the user may have started typing since.
+  // Appending to their draft and pressing Enter would submit a half-written
+  // message — the one way this tool could destroy work rather than save it.
+  if (session.hasDraftInput()) {
+    logWarn('inject.skipped_draft', { pid: session.pid });
+    return { ok: false, reason: 'the user has something typed but not sent' };
+  }
   if (!isSafeContinuation(text)) {
     logWarn('inject.rejected', { reason: 'unsafe continuation text' });
     return { ok: false, reason: 'continuation text rejected as unsafe' };

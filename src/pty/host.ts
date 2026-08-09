@@ -23,10 +23,52 @@ export interface PtySession {
   write(data: string): boolean;
   /** Can this host inject input? False in the degraded, no-node-pty path. */
   readonly canInject: boolean;
+  /**
+   * Has the user typed something they have not submitted?
+   *
+   * We forward every keystroke, so we can tell: anything typed since the last
+   * Enter is an unsubmitted draft. Injecting then would append our text to
+   * theirs and press Enter, submitting a half-written message — which is the
+   * one way this tool could actively damage someone's work.
+   */
+  hasDraftInput(): boolean;
   onData(cb: (chunk: string) => void): void;
   onExit(cb: (code: number) => void): void;
   resize(cols: number, rows: number): void;
   kill(): void;
+}
+
+/**
+ * Track whether the user has an unsubmitted line in the input box.
+ *
+ * Deliberately conservative: anything that is not clearly a submit or a clear
+ * leaves the draft flag set, because a false "no draft" is the expensive
+ * mistake and a false "has draft" only means we skip one nudge.
+ */
+export function draftTracker() {
+  let dirty = false;
+  return {
+    /** Feed every byte the user types. */
+    observe(input: string): void {
+      for (const ch of input) {
+        if (ch === '\r' || ch === '\n') {
+          dirty = false; // submitted
+        } else if (ch === '\u0003' || ch === '\u001b') {
+          dirty = false; // Ctrl-C or Escape clears the box
+        } else if (ch === '\u007f' || ch === '\b') {
+          // A backspace might have emptied the box, but we cannot know; stay
+          // dirty rather than guess in the dangerous direction.
+        } else if (ch >= ' ') {
+          dirty = true;
+        }
+      }
+    },
+    isDirty: () => dirty,
+    /** Our own injected text must not be mistaken for the user's typing. */
+    reset(): void {
+      dirty = false;
+    },
+  };
 }
 
 interface NodePtyProcess {
@@ -98,7 +140,12 @@ export async function spawnPty(
       for (const h of dataHandlers) h(chunk);
     });
 
-    const onStdin = (buf: Buffer) => proc.write(buf.toString('utf8'));
+    const draft = draftTracker();
+    const onStdin = (buf: Buffer) => {
+      const text = buf.toString('utf8');
+      draft.observe(text);
+      proc.write(text);
+    };
     const wasRaw = process.stdin.isTTY ? process.stdin.isRaw : false;
     if (process.stdin.isTTY) process.stdin.setRawMode(true);
     process.stdin.resume();
@@ -118,8 +165,11 @@ export async function spawnPty(
     return {
       pid: proc.pid,
       canInject: true,
+      hasDraftInput: () => draft.isDirty(),
       write: (data: string) => {
         proc.write(data);
+        // Our own text is not the user's typing; do not let it look like a draft.
+        draft.reset();
         return true;
       },
       onData: (cb) => dataHandlers.push(cb),
@@ -150,6 +200,9 @@ export async function spawnPty(
   return {
     pid: child.pid ?? -1,
     canInject: false,
+    // We do not own the input stream here, so we cannot know. Say "draft" and
+    // stay out of the way.
+    hasDraftInput: () => true,
     write: () => false,
     onData: () => {
       /* no PTY to observe in the degraded path */

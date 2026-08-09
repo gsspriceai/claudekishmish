@@ -38,7 +38,7 @@ import {
   readSince,
   userTurnTimes,
 } from '../claude/transcript.js';
-import { checkSessionLiveness, type LivenessResult } from '../claude/sessions.js';
+import { checkSessionLiveness, readSessionFiles, type LivenessResult } from '../claude/sessions.js';
 
 /** How many consecutive unreadable liveness checks before we give up on a session. */
 const MAX_MISSED_LIVENESS = 5;
@@ -54,6 +54,8 @@ interface SessionObservation {
   turns: number[];
   limit: LimitEvent | null;
   liveness: LivenessResult;
+  /** Claude Code's own status for the session: idle / busy / shell. */
+  status: string | null;
 }
 
 /** Phase 1: everything that touches the filesystem. */
@@ -67,9 +69,11 @@ function observe(state: State, ownSessionId: string | null): SessionObservation[
       ? checkSessionLiveness(id, session.procStart, session.pid)
       : 'unknown';
 
+    const status = (readSessionFiles() ?? []).find((d) => d.sessionId === id)?.status ?? null;
+
     const file = findTranscript(id);
     if (!file) {
-      out.push({ sessionId: id, turns: [], limit: null, liveness });
+      out.push({ sessionId: id, turns: [], limit: null, liveness, status });
       continue;
     }
 
@@ -82,6 +86,7 @@ function observe(state: State, ownSessionId: string | null): SessionObservation[
       turns: userTurnTimes(records),
       limit: latestLimitEvent(records),
       liveness,
+      status,
     });
   }
   return out;
@@ -157,8 +162,12 @@ export function applyLiveness(state: State, observations: SessionObservation[]):
     if (!session) continue;
 
     if (obs.liveness === 'alive') {
-      if (session.missedLivenessChecks !== 0) {
-        sessions[obs.sessionId] = { ...session, missedLivenessChecks: 0 };
+      if (session.missedLivenessChecks !== 0 || session.sessionStatus !== obs.status) {
+        sessions[obs.sessionId] = {
+          ...session,
+          missedLivenessChecks: 0,
+          sessionStatus: obs.status,
+        };
       }
       continue;
     }
@@ -180,6 +189,11 @@ export interface TickContext {
   actor: Actor;
   /** Perform the in-place continuation. Only meaningful for a PTY owner. */
   resume: (sessionId: string) => Promise<boolean>;
+  /**
+   * Type a single word into an already-open, idle session to claim the
+   * boundary through it, instead of starting a new session. PTY owner only.
+   */
+  nudge?: (sessionId: string) => Promise<boolean>;
   config: Config;
 }
 
@@ -205,7 +219,7 @@ export async function tick(ctx: TickContext): Promise<ClaimDecision> {
     const d = decideClaim(next, ctx.config, now, ctx.actor);
 
     // Take an owned hold only for actions this process will actually attempt.
-    if (d.action === 'resume' || d.action === 'ping') {
+    if (d.action === 'resume' || d.action === 'ping' || d.action === 'nudge') {
       next = { ...next, ledger: reserveBoundary(next.ledger, ctx.actor.id, now) };
     }
     return { next, result: d };
@@ -244,6 +258,26 @@ export async function tick(ctx: TickContext): Promise<ClaimDecision> {
       return { next, result: undefined };
     });
     logAction(ok ? 'resume.ok' : 'resume.failed', { sessionId: decision.sessionId });
+    return decision;
+  }
+
+  if (decision.action === 'nudge') {
+    const ok = ctx.nudge ? await ctx.nudge(decision.sessionId) : false;
+    await mutateState((state) => {
+      if (!ok) return { ...state, ledger: releaseReservation(state.ledger, ctx.actor.id) };
+      const stamped = Date.now();
+      return {
+        ...state,
+        ledger: commitClaim(state.ledger, ctx.actor.id, stamped),
+        // A nudge spends quota exactly like a ping, so it counts against the
+        // same weekly cap. Only the delivery differs.
+        weekly: {
+          ...state.weekly,
+          idleClaims: [...state.weekly.idleClaims, stamped].filter((t) => stamped - t < WEEK_MS),
+        },
+      };
+    });
+    logAction(ok ? 'nudge.ok' : 'nudge.failed', { sessionId: decision.sessionId });
     return decision;
   }
 
@@ -311,7 +345,10 @@ export async function bootstrapLedger(): Promise<boolean> {
 
 /** Register a wrapped session so the daemon and `ckm status` can see it. */
 export async function registerSession(
-  session: Omit<SupervisedSession, 'registeredAt' | 'updatedAt' | 'missedLivenessChecks' | 'supervisedFrom'>,
+  session: Omit<
+    SupervisedSession,
+    'registeredAt' | 'updatedAt' | 'missedLivenessChecks' | 'supervisedFrom' | 'sessionStatus' | 'hasDraftInput'
+  >,
 ): Promise<void> {
   const now = Date.now();
   readOffsets.delete(session.sessionId);
@@ -326,6 +363,8 @@ export async function registerSession(
           // Carry the count forward: the cap is per session, not per process.
           resumeCount: previous?.resumeCount ?? 0,
           supervisedFrom: now,
+          sessionStatus: null,
+          hasDraftInput: false,
           missedLivenessChecks: 0,
           registeredAt: now,
           updatedAt: now,
@@ -344,6 +383,23 @@ export async function deregisterSession(sessionId: string): Promise<void> {
     return { ...state, sessions };
   });
   logInfo('session.deregistered', { sessionId });
+}
+
+/**
+ * Publish whether the user has an unsubmitted draft.
+ *
+ * Only the process owning the PTY can know this, so only it reports it — and it
+ * must, because the decision to nudge is taken from shared state.
+ */
+export async function reportDraftInput(sessionId: string, hasDraft: boolean): Promise<void> {
+  await mutateState((state) => {
+    const session = state.sessions[sessionId];
+    if (!session || session.hasDraftInput === hasDraft) return state;
+    return {
+      ...state,
+      sessions: { ...state.sessions, [sessionId]: { ...session, hasDraftInput: hasDraft } },
+    };
+  });
 }
 
 /** Re-check eligibility at the moment of acting, not at the moment of planning. */
