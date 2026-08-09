@@ -141,7 +141,7 @@ export async function runWrap(args: string[]): Promise<number> {
       logInfo('nudge.skipped', { reason: 'user has an unsent draft' });
       return false;
     }
-    const outcome = await injectContinuation(pty, loadConfig().pingText);
+    const outcome = await injectContinuation(pty, loadConfig().nudgeText);
     if (!outcome.ok) logInfo('nudge.skipped', { reason: outcome.reason });
     return outcome.ok;
   };
