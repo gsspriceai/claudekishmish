@@ -19,6 +19,7 @@ import { spawn, type ChildProcess } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { mutateState, readState } from '../src/state/store.js';
 import type { State } from '../src/state/schema.js';
+import { PTY_AVAILABLE, PTY_SKIP_REASON } from './helpers/pty-available.js';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const repo = path.resolve(here, '..');
@@ -122,7 +123,7 @@ function startWrap(extraEnv: Record<string, string> = {}): ChildProcess {
 
 const pending = () => (readState().sessions[SESSION_ID]?.pendingResume ? true : null);
 
-describe('wrap → limit → continue', () => {
+describe.skipIf(!PTY_AVAILABLE)(`wrap → limit → continue (${PTY_SKIP_REASON})`, () => {
   it('registers the session and records the live limit', async () => {
     child = startWrap();
 
@@ -197,7 +198,7 @@ describe('wrap → limit → continue', () => {
   });
 });
 
-describe('wrap lifecycle', () => {
+describe.skipIf(!PTY_AVAILABLE)(`wrap lifecycle (${PTY_SKIP_REASON})`, () => {
   /**
    * node-pty leaves live handles behind, so without an explicit exit the
    * wrapper never terminates: the user quits Claude Code and their prompt never

@@ -12,8 +12,10 @@
  */
 
 import fs from 'node:fs';
+import os from 'node:os';
 import { locateClaude } from '../../claude/locate.js';
 import { spawnSync } from 'node:child_process';
+import { createRequire } from 'node:module';
 import { spawnClaudeSync } from '../../claude/spawn.js';
 import { claudeProjectsDir, claudeSessionsDir, ckmHome, daemonLockPath } from '../../platform/paths.js';
 import { liveTerminalSessions, pidAlive } from '../../claude/sessions.js';
@@ -47,8 +49,20 @@ async function probePty(): Promise<{ ok: boolean; detail: string }> {
     };
   }
 
+  // node-pty resolved to an absolute path *here*, in this package, and passed
+  // into the child. A `-e` script resolves bare specifiers against its cwd, so
+  // `require('node-pty')` fails for every globally-installed user running
+  // `ckm doctor` from their own project - and the doctor would then report a
+  // broken pty on machines where the pty is fine.
+  let entry: string;
+  try {
+    entry = createRequire(import.meta.url).resolve('node-pty');
+  } catch {
+    return { ok: false, detail: 'installed but not resolvable from this package - reinstall claudekishmish' };
+  }
+
   const script = [
-    "const pty = require('node-pty');",
+    `const pty = require(${JSON.stringify(entry)});`,
     "const p = pty.spawn(process.execPath, ['-e', '0'], { cols: 80, rows: 24, cwd: require('os').tmpdir() });",
     'p.kill();',
     'process.exit(0);',
@@ -57,7 +71,7 @@ async function probePty(): Promise<{ ok: boolean; detail: string }> {
   const probe = spawnSync(process.execPath, ['-e', script], {
     encoding: 'utf8',
     timeout: 20_000,
-    cwd: process.cwd(),
+    cwd: os.tmpdir(),
     windowsHide: true,
   });
 

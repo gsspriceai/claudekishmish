@@ -81,28 +81,31 @@ the grid from the moment it actually sent something.
 
 If you want the countdown to survive the night, the machine has to stay awake.
 
-## macOS: in-place continuation needs one extra step
+## macOS: what happens about `spawn-helper`
 
 `node-pty` 1.1.0 ships its `spawn-helper` **non-executable** in the darwin
 prebuilds, and macOS is the only platform whose code path executes that helper.
-So on a stock `npm i -g`, allocating a PTY fails with `posix_spawnp failed`.
+On a stock `npm i -g`, allocating a PTY therefore fails with `posix_spawnp
+failed` — the module imports perfectly and then every spawn throws, so nothing
+that merely checks "is node-pty installed" can see it.
 
-The tool degrades rather than breaking: boundary claiming, limit detection and
-every command keep working, and `claude` itself is unaffected. What you lose is
-in-place continuation — the thing that types into your terminal.
+claudekishmish repairs it: on macOS, at load, it adds the missing execute bit
+to that one file and leaves every other permission as it found it. Nothing is
+patched or replaced — the file is published with that bit and loses it in
+transit.
 
-To get it, install so node-pty builds from source (needs Xcode command line
-tools):
+If the repair is refused — a global install under a root-owned prefix — the tool
+degrades instead of breaking. Boundary claiming, limit detection and every
+command keep working, and your `claude` is unaffected; what you lose is in-place
+continuation, the part that types into your terminal. Either reinstall somewhere
+you own, or build node-pty from source (needs Xcode command line tools):
 
 ```bash
 npm_config_build_from_source=true npm i -g claudekishmish
 ```
 
-`ckm doctor` tells you which mode you are in — it allocates a real PTY rather
-than just loading the module, because on macOS the module loads perfectly and
-then refuses to spawn.
-
-Reported upstream; this section goes away when it is fixed.
+`ckm doctor` tells you which mode you are in. It allocates a real PTY rather
+than loading the module, because on macOS loading proves nothing.
 
 ## Three limits, three responses
 

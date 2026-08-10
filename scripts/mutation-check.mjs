@@ -240,6 +240,43 @@ const MUTATIONS = [
     expect: 'test/wiring.test.ts',
   },
   {
+    name: 'the macOS spawn-helper repair is never called (job 2 dead on macOS)',
+    file: 'src/pty/host.ts',
+    find: `    repair();`,
+    replace: ``,
+    expect: 'test/spawn-helper.test.ts',
+  },
+  {
+    name: 'the repair chmods on every platform, not just macOS',
+    file: 'src/pty/spawn-helper.ts',
+    find: `  if (platform !== 'darwin') return 'not-darwin';
+
+  const helper = findSpawnHelper(entry);`,
+    replace: `  const helper = findSpawnHelper(entry);`,
+    expect: 'test/spawn-helper.test.ts',
+  },
+  {
+    name: 'the repair widens permissions instead of adding one bit',
+    file: 'src/pty/spawn-helper.ts',
+    find: `    ops.chmod(helper, (mode | EXEC_BITS) & 0o7777);`,
+    replace: `    ops.chmod(helper, 0o777);`,
+    expect: 'test/spawn-helper.test.ts',
+  },
+  {
+    name: 'the helper search climbs out of the package',
+    file: 'src/pty/spawn-helper.ts',
+    find: `  for (let i = 0; i < 5; i++) {`,
+    replace: `  for (let i = 0; i < 500; i++) {`,
+    expect: 'test/spawn-helper.test.ts',
+  },
+  {
+    name: 'doctor reports a broken pty everywhere except this repo',
+    file: 'src/cli/commands/doctor.ts',
+    find: '    `const pty = require(${JSON.stringify(entry)});`,',
+    replace: `    "const pty = require('node-pty');",`,
+    expect: 'test/doctor.test.ts',
+  },
+  {
     name: 'a 24-hour reset string is unparseable (continuation never fires)',
     file: 'src/claude/resetparse.ts',
     find: `  if (!m) return parse24HourReset(text, now);`,

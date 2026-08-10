@@ -19,6 +19,7 @@ import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { draftTracker } from '../src/pty/host.js';
+import { PTY_AVAILABLE, PTY_SKIP_REASON } from './helpers/pty-available.js';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const repo = path.resolve(here, '..');
@@ -138,7 +139,7 @@ describe('draftTracker — what clears the box', () => {
  * a vitest worker — the same reason the integration tests run `ckm wrap` as a
  * child rather than in-process.
  */
-describe('draft tracking is wired to the real keystroke stream', () => {
+describe.skipIf(!PTY_AVAILABLE)(`draft tracking is wired to the real keystroke stream (${PTY_SKIP_REASON})`, () => {
   const probe = path.join(here, 'fixtures', 'draft-wire-probe.mjs');
   const host = path.join(repo, 'dist', 'pty', 'host.js');
 

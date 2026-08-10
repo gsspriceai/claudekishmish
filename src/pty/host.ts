@@ -17,6 +17,7 @@ import { StringDecoder } from 'node:string_decoder';
 import { spawn as spawnChild, type ChildProcess } from 'node:child_process';
 import { toLaunchable } from '../claude/spawn.js';
 import { logWarn } from '../logger/index.js';
+import { repairInstalledSpawnHelper } from './spawn-helper.js';
 
 export interface PtySession {
   /** PID of the spawned `claude`. */
@@ -146,12 +147,26 @@ interface NodePtyModule {
   spawn(file: string, args: string[], options: Record<string, unknown>): NodePtyProcess;
 }
 
-/** Load node-pty if it is installed and loadable on this platform. */
-export async function loadNodePty(): Promise<NodePtyModule | null> {
+/**
+ * Load node-pty if it is installed and loadable on this platform.
+ *
+ * @param repair  injected so the test suite can prove the repair is actually
+ *                wired here. A repair function with tests and no caller is not
+ *                a fix, and that exact shape is how the macOS breakage survived
+ *                three audits.
+ */
+export async function loadNodePty(
+  repair: () => unknown = repairInstalledSpawnHelper,
+): Promise<NodePtyModule | null> {
   // Non-literal on purpose: keeps the optional dependency out of type resolution.
   const specifier = 'node-pty';
   try {
     const mod = (await import(specifier)) as { default?: NodePtyModule } & NodePtyModule;
+    // Loading is not the same as being able to spawn. On macOS the module
+    // imports cleanly and every spawn then throws, because its `spawn-helper`
+    // arrives without an executable bit. Repaired here, before the first
+    // spawn — and a no-op on every other platform.
+    repair();
     return mod.default ?? mod;
   } catch {
     return null;
