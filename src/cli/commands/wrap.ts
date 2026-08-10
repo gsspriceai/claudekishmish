@@ -37,9 +37,14 @@ import {
 async function awaitSessionDescriptor(
   pid: number,
   timeoutMs: number,
+  hasExited: () => boolean,
 ): Promise<{ sessionId: string; cwd: string; name: string; procStart: string | null } | null> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
+    // `claude --version`, `--help`, `mcp list` and any scripted `-p` run print
+    // and leave without ever publishing an interactive descriptor. Waiting the
+    // full timeout for one would stall the user's shell on every such command.
+    if (hasExited()) return null;
     const match = (readSessionFiles() ?? []).find((s) => s.pid === pid);
     if (match) {
       if (!isInteractiveTerminalSession(match)) {
@@ -92,6 +97,13 @@ export async function runWrap(args: string[]): Promise<number> {
     [SUPERVISION_DEPTH_VAR]: String(depth + 1),
   });
 
+  // Registered before anything else can await: a short-lived invocation exits
+  // in milliseconds, and an exit delivered to nobody is a hung terminal.
+  let childExit: number | null = null;
+  pty.onExit((code) => {
+    childExit = code;
+  });
+
   if (!pty.canInject) {
     process.stderr.write(
       'claudekishmish: node-pty is unavailable, so this session cannot be continued in place.\n' +
@@ -99,7 +111,7 @@ export async function runWrap(args: string[]): Promise<number> {
     );
   }
 
-  const descriptor = await awaitSessionDescriptor(pty.pid, 30_000);
+  const descriptor = await awaitSessionDescriptor(pty.pid, 30_000, () => childExit !== null);
   let sessionId: string | null = null;
 
   if (descriptor) {
@@ -153,6 +165,14 @@ export async function runWrap(args: string[]): Promise<number> {
       });
   }, config.pollIntervalMs);
   loop.unref?.();
+
+  // Already gone — a short command that finished during startup.
+  if (childExit !== null) {
+    clearInterval(loop);
+    stopped = true;
+    if (sessionId) await deregisterSession(sessionId);
+    return childExit;
+  }
 
   return await new Promise<number>((resolve) => {
     pty.onExit((code) => {

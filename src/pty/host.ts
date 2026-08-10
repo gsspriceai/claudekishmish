@@ -13,6 +13,7 @@
  * boundaries; we just say plainly that in-place continuation is unavailable.
  */
 
+import { StringDecoder } from 'node:string_decoder';
 import { spawn as spawnChild, type ChildProcess } from 'node:child_process';
 import { toLaunchable } from '../claude/spawn.js';
 
@@ -26,10 +27,9 @@ export interface PtySession {
   /**
    * Has the user typed something they have not submitted?
    *
-   * We forward every keystroke, so we can tell: anything typed since the last
-   * Enter is an unsubmitted draft. Injecting then would append our text to
-   * theirs and press Enter, submitting a half-written message — which is the
-   * one way this tool could actively damage someone's work.
+   * We forward every keystroke, so we can tell. Injecting over a draft would
+   * append our text to theirs and press Enter, submitting a half-written
+   * message — the one way this tool could destroy work rather than save it.
    */
   hasDraftInput(): boolean;
   onData(cb: (chunk: string) => void): void;
@@ -38,36 +38,96 @@ export interface PtySession {
   kill(): void;
 }
 
+const ESC = '\u001b';
+const CR = '\r';
+const LF = '\n';
+const CTRL_C = '\u0003';
+const CTRL_U = '\u0015';
+const BACKSPACE = '\u007f';
+const PASTE_START = '\u001b[200~';
+const PASTE_END = '\u001b[201~';
+
 /**
  * Track whether the user has an unsubmitted line in the input box.
  *
- * Deliberately conservative: anything that is not clearly a submit or a clear
- * leaves the draft flag set, because a false "no draft" is the expensive
- * mistake — it submits the user's half-written message — while a false "has
- * draft" only costs us one deferred continuation.
+ * The governing rule: **a false "clean" submits the user's half-written
+ * message; a false "dirty" only costs one deferred continuation, retried on the
+ * next tick.** So clearing is deliberately hard and staying dirty is easy.
+ *
+ * The first version cleared on any CR, LF or ESC, which reported CLEAN for both
+ * documented ways to put a newline in Claude Code's input box — Alt/Option+Enter
+ * (ESC then CR) and a trailing backslash then Enter. Someone typing a multi-line
+ * message and stepping away would have had it submitted for them hours later.
+ *
+ * Only three things clear the box now: Enter that is not continuing a line,
+ * Ctrl-C, and Ctrl-U. A bare ESC does not, because it is indistinguishable from
+ * the start of an escape sequence; and a chunk carrying a newline plus more
+ * content does not, because composing is far likelier than submitting.
  */
 export function draftTracker() {
   let dirty = false;
+  /** Last character seen, kept across chunks so ESC+CR split over two reads works. */
+  let prev = '';
+  let inBracketedPaste = false;
+
   return {
-    /** Feed every byte the user types. */
+    /** Feed every keystroke the user sends, decoded but otherwise untouched. */
     observe(input: string): void {
-      for (const ch of input) {
-        if (ch === '\r' || ch === '\n') {
-          dirty = false; // submitted
-        } else if (ch === '\u0003' || ch === '\u001b') {
-          dirty = false; // Ctrl-C or Escape clears the box
-        } else if (ch === '\u007f' || ch === '\b') {
-          // A backspace might have emptied the box, but we cannot know; stay
-          // dirty rather than guess in the dangerous direction.
+      let text = input;
+
+      // Bracketed paste is unambiguous: everything inside the markers is content.
+      for (;;) {
+        if (!inBracketedPaste) {
+          const start = text.indexOf(PASTE_START);
+          if (start === -1) break;
+          inBracketedPaste = true;
+          dirty = true;
+          text = text.slice(start + PASTE_START.length);
+          continue;
+        }
+        const end = text.indexOf(PASTE_END);
+        if (end === -1) break;
+        inBracketedPaste = false;
+        dirty = true;
+        text = text.slice(end + PASTE_END.length);
+      }
+      if (inBracketedPaste) {
+        if (text.length > 0) dirty = true;
+        return;
+      }
+
+      // A chunk carrying a newline alongside other content is a paste, not a
+      // keypress. Treat every newline in it as part of the draft.
+      const newlines = (text.match(/[\r\n]/g) ?? []).length;
+      const looksPasted =
+        newlines > 1 || (newlines === 1 && text.length > 2 && !/[\r\n]$/.test(text));
+
+      for (const ch of text) {
+        if (ch === CR || ch === LF) {
+          if (prev === ESC || prev === '\\' || looksPasted) {
+            // A newline *inside* the box: Alt+Enter, backslash-continuation, or
+            // pasted content. Still unsent, and now multi-line.
+            dirty = true;
+          } else {
+            dirty = false;
+          }
+        } else if (ch === CTRL_C || ch === CTRL_U) {
+          dirty = false;
+        } else if (ch === BACKSPACE || ch === '\b') {
+          // A backspace may have emptied the box, but we cannot know. Staying
+          // dirty is the cheap error.
         } else if (ch >= ' ') {
           dirty = true;
         }
+        prev = ch;
       }
     },
     isDirty: () => dirty,
     /** Our own injected text must not be mistaken for the user's typing. */
     reset(): void {
       dirty = false;
+      prev = '';
+      inBracketedPaste = false;
     },
   };
 }
@@ -111,14 +171,23 @@ function childEnv(extra: Record<string, string>): Record<string, string> {
  * The parent's stdin is switched to raw mode so the child sees keystrokes
  * exactly as it would if it had been launched directly — arrow keys, Ctrl-C,
  * bracketed paste and the TUI's own redraws all behave normally. Every listener
- * and mode change is undone on exit, so the caller's process can actually
- * terminate afterwards.
+ * and mode change is undone on exit, so the caller's process can terminate.
  */
 export async function spawnPty(
   bin: string,
   args: string[],
   cwd: string,
   extraEnv: Record<string, string> = {},
+  /**
+   * The keystroke source. Defaults to this process's stdin; injectable so a
+   * test can drive the *real* wiring, which is otherwise untestable — deleting
+   * the tracker's feed used to leave the whole suite green.
+   */
+  input: NodeJS.ReadableStream & {
+    isTTY?: boolean;
+    isRaw?: boolean;
+    setRawMode?: (raw: boolean) => void;
+  } = process.stdin,
 ): Promise<PtySession> {
   const pty = await loadNodePty();
   const env = childEnv(extraEnv);
@@ -135,6 +204,13 @@ export async function spawnPty(
 
     const dataHandlers: ((chunk: string) => void)[] = [];
     const exitHandlers: ((code: number) => void)[] = [];
+    /**
+     * The child can exit before the caller has registered a handler — a
+     * `claude --version` is gone in well under a second. Latch the code so a
+     * late registration still fires, rather than the exit being delivered to
+     * nobody and the caller waiting for ever.
+     */
+    let exitedWith: number | null = null;
 
     proc.onData((chunk) => {
       process.stdout.write(chunk);
@@ -142,24 +218,31 @@ export async function spawnPty(
     });
 
     const draft = draftTracker();
+    // A decoder, not `buf.toString()`: a multi-byte character split across two
+    // reads would otherwise be forwarded as replacement characters and the
+    // user's own keystrokes would be corrupted in their session.
+    const decoder = new StringDecoder('utf8');
     const onStdin = (buf: Buffer) => {
-      const text = buf.toString('utf8');
+      const text = decoder.write(buf);
+      if (text.length === 0) return;
       draft.observe(text);
       proc.write(text);
     };
-    const wasRaw = process.stdin.isTTY ? process.stdin.isRaw : false;
-    if (process.stdin.isTTY) process.stdin.setRawMode(true);
-    process.stdin.resume();
-    process.stdin.on('data', onStdin);
+
+    const wasRaw = input.isTTY ? Boolean(input.isRaw) : false;
+    if (input.isTTY) input.setRawMode?.(true);
+    input.resume();
+    input.on('data', onStdin);
 
     const onResize = () => proc.resize(process.stdout.columns ?? 80, process.stdout.rows ?? 30);
     process.stdout.on('resize', onResize);
 
     proc.onExit(({ exitCode }) => {
-      process.stdin.off('data', onStdin);
+      input.off('data', onStdin);
       process.stdout.off('resize', onResize);
-      if (process.stdin.isTTY) process.stdin.setRawMode(wasRaw);
-      process.stdin.pause();
+      if (input.isTTY) input.setRawMode?.(wasRaw);
+      input.pause();
+      exitedWith = exitCode;
       for (const h of exitHandlers) h(exitCode);
     });
 
@@ -174,7 +257,10 @@ export async function spawnPty(
         return true;
       },
       onData: (cb) => dataHandlers.push(cb),
-      onExit: (cb) => exitHandlers.push(cb),
+      onExit: (cb) => {
+        if (exitedWith !== null) cb(exitedWith);
+        else exitHandlers.push(cb);
+      },
       resize: (cols, rows) => proc.resize(cols, rows),
       kill: () => proc.kill(),
     };
@@ -191,12 +277,14 @@ export async function spawnPty(
   });
 
   const exitHandlers: ((code: number) => void)[] = [];
-  child.on('exit', (code) => {
-    for (const h of exitHandlers) h(code ?? 0);
-  });
-  child.on('error', () => {
-    for (const h of exitHandlers) h(127);
-  });
+  let exitedWith: number | null = null;
+  const settle = (code: number) => {
+    if (exitedWith !== null) return;
+    exitedWith = code;
+    for (const h of exitHandlers) h(code);
+  };
+  child.on('exit', (code) => settle(code ?? 0));
+  child.on('error', () => settle(127));
 
   return {
     pid: child.pid ?? -1,
@@ -208,7 +296,10 @@ export async function spawnPty(
     onData: () => {
       /* no PTY to observe in the degraded path */
     },
-    onExit: (cb) => exitHandlers.push(cb),
+    onExit: (cb) => {
+      if (exitedWith !== null) cb(exitedWith);
+      else exitHandlers.push(cb);
+    },
     resize: () => {},
     kill: () => child.kill(),
   };
