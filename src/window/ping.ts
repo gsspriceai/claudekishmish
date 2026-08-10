@@ -84,7 +84,7 @@ export function pingArgs(text: string): string[] {
  * Runs in the OS temp directory rather than any project, so no CLAUDE.md and no
  * project settings are discovered.
  */
-export function sendPing(text: string, timeoutMs = 120_000): Promise<PingResult> {
+export function sendPing(text: string, timeoutMs = 60_000): Promise<PingResult> {
   return new Promise((resolve) => {
     const bin = locateClaude();
     if (!bin) {
@@ -164,14 +164,17 @@ export function sendPing(text: string, timeoutMs = 120_000): Promise<PingResult>
  * Retry with exponential backoff — but only what retrying can fix.
  *
  * A missed boundary shifts every later boundary, so a transient failure is
- * worth a few attempts. A terminal one (logged out, subscription ended) returns
+ * worth a few attempts. The budget is deliberately bounded — 3 attempts of 60s
+ * with 15s and 30s backoff, so 225s worst case — because the whole act phase
+ * has to finish inside the boundary reservation it holds. A measured claim
+ * takes about 6 seconds. A terminal one (logged out, subscription ended) returns
  * immediately: the caller halts the tool rather than repeating a request that
  * cannot succeed.
  */
 export async function sendPingWithRetry(
   text: string,
   attempts = 3,
-  baseDelayMs = 30_000,
+  baseDelayMs = 15_000,
 ): Promise<PingResult> {
   let last: PingResult = { ok: false, detail: 'not attempted' };
   for (let i = 0; i < attempts; i++) {

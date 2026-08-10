@@ -3,6 +3,7 @@ import {
   applyObservation,
   ceil10,
   commitClaim,
+  holdsReservation,
   computeWindow,
   deriveLedgerFromTurns,
   floor10,
@@ -12,6 +13,7 @@ import {
   msUntilBoundary,
   nextBoundary,
   releaseReservation,
+  repairLedger,
   reserveBoundary,
   reservedByOther,
   RESERVATION_TTL_MS,
@@ -203,8 +205,9 @@ describe('reservation protocol', () => {
 
   it('commits only after a request landed, opening a grid-aligned window', () => {
     const reserved = reserveBoundary(ledgerEnding(end), 'actor-a', now);
-    const claimed = commitClaim(reserved, 'actor-a', now);
+    const { ledger: claimed, committed } = commitClaim(reserved, 'actor-a', now);
 
+    expect(committed).toBe(true);
     expect(claimed.lastClaimedBoundary).toBe(end);
     expect(claimed.reservation).toBeNull();
     expect(claimed.currentStart).toBe(floor10(now));
@@ -212,6 +215,68 @@ describe('reservation protocol', () => {
     expect(claimed.currentStart! % GRID_MS).toBe(0);
     // And the same boundary can never be claimed twice.
     expect(isBoundaryDue(claimed, now + 1000, 20_000)).toBe(false);
+  });
+
+  it('refuses to commit without holding the reservation', () => {
+    const reserved = reserveBoundary(ledgerEnding(end), 'actor-a', now);
+    const { ledger, committed } = commitClaim(reserved, 'actor-b', now);
+    expect(committed).toBe(false);
+    expect(ledger).toBe(reserved);
+  });
+
+  it('refuses to commit once its own hold has expired', () => {
+    // The act phase outliving its reservation is what let two actors claim the
+    // same boundary, and the second commit froze the ledger for ever.
+    const reserved = reserveBoundary(ledgerEnding(end), 'actor-a', now);
+    const late = now + RESERVATION_TTL_MS + 1;
+    expect(commitClaim(reserved, 'actor-a', late).committed).toBe(false);
+  });
+
+  it('holdsReservation tracks owner and expiry', () => {
+    const reserved = reserveBoundary(ledgerEnding(end), 'actor-a', now);
+    expect(holdsReservation(reserved, 'actor-a', now)).toBe(true);
+    expect(holdsReservation(reserved, 'actor-b', now)).toBe(false);
+    expect(holdsReservation(reserved, 'actor-a', now + RESERVATION_TTL_MS + 1)).toBe(false);
+  });
+
+  it('the reservation outlives the worst-case act phase', () => {
+    // 3 ping attempts of 60s plus 15s and 30s of backoff. If the hold expires
+    // first, its owner's own request races a second actor's.
+    const worstCaseActPhaseMs = 3 * 60_000 + 15_000 + 30_000;
+    expect(RESERVATION_TTL_MS).toBeGreaterThan(worstCaseActPhaseMs);
+  });
+
+  /**
+   * A claim opens a window five hours past the boundary it spends, so a claim
+   * stamp at or after `currentEnd` is impossible. When it happened,
+   * `nextBoundary` returned null for ever: the tool went silent while status
+   * still showed a healthy window.
+   */
+  it('never records a claim at or after the window it opens', () => {
+    const reserved = reserveBoundary(ledgerEnding(end), 'actor-a', now);
+    const { ledger } = commitClaim(reserved, 'actor-a', now);
+    expect(ledger.lastClaimedBoundary!).toBeLessThan(ledger.currentEnd!);
+  });
+
+  it('repairs an impossible ledger instead of staying frozen for ever', () => {
+    const frozen: WindowLedger = {
+      currentStart: end,
+      currentEnd: end + WINDOW_MS,
+      lastClaimedBoundary: end + WINDOW_MS, // at the window's own end
+      reservation: null,
+      source: 'claim',
+    };
+    expect(nextBoundary(frozen)).toBeNull();
+
+    const repaired = repairLedger(frozen);
+    expect(repaired.lastClaimedBoundary).toBeNull();
+    expect(nextBoundary(repaired)).toBe(end + WINDOW_MS);
+  });
+
+  it('leaves a healthy ledger alone', () => {
+    const healthy = reserveBoundary(ledgerEnding(end), 'a', now);
+    const { ledger } = commitClaim(healthy, 'a', now);
+    expect(repairLedger(ledger)).toEqual(ledger);
   });
 });
 

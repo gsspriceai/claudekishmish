@@ -38,8 +38,16 @@ import type { WindowLedger } from '../state/schema.js';
 export const MINUTE_MS = 60_000;
 export const GRID_MS = 10 * MINUTE_MS;
 export const WINDOW_MS = 5 * 60 * MINUTE_MS;
-/** How long an actor may hold a boundary while trying to act on it. */
-export const RESERVATION_TTL_MS = 3 * MINUTE_MS;
+/**
+ * How long an actor may hold a boundary while trying to act on it.
+ *
+ * This must comfortably exceed the worst case act phase, or the holder's own
+ * request outlives its reservation and a second actor claims the same boundary
+ * underneath it. With the ping budget in `ping.ts` (3 attempts, 60s each, 15s
+ * and 30s backoff) the worst case is 225s, so 10 minutes leaves ample margin
+ * without letting a genuinely dead owner strand a boundary for long.
+ */
+export const RESERVATION_TTL_MS = 10 * MINUTE_MS;
 
 /** Round an epoch time down to the 10-minute grid. */
 export function floor10(t: number): number {
@@ -139,6 +147,12 @@ export function reserveBoundary(ledger: WindowLedger, owner: string, now: number
   };
 }
 
+/** Does this actor currently hold the boundary? */
+export function holdsReservation(ledger: WindowLedger, owner: string, now: number): boolean {
+  const r = ledger.reservation;
+  return r !== null && r.owner === owner && now < r.expiresAt;
+}
+
 /** Give the boundary back. Only the owner may release its own hold. */
 export function releaseReservation(ledger: WindowLedger, owner: string): WindowLedger {
   if (ledger.reservation === null || ledger.reservation.owner !== owner) return ledger;
@@ -150,17 +164,65 @@ export function releaseReservation(ledger: WindowLedger, owner: string): WindowL
  *
  * The claim is itself a first message, so it opens a window anchored on the
  * grid at `floor10(claimedAt)`.
+ *
+ * **Only the holder may commit.** Without that rule, an actor whose reservation
+ * lapsed mid-request would commit against a ledger another actor had already
+ * advanced, and the old fallback read that *new* `currentEnd` as the boundary it
+ * had claimed. The result was `lastClaimedBoundary === currentEnd`, which makes
+ * `nextBoundary` return null for ever: the tool goes permanently silent while
+ * `ckm status` still shows a healthy window.
+ *
+ * Returns `committed: false` and an unchanged ledger when the hold is gone —
+ * the request was still sent and the window it opened is real, but it is not
+ * this actor's to record.
  */
-export function commitClaim(ledger: WindowLedger, owner: string, claimedAt: number): WindowLedger {
-  const boundary = ledger.reservation?.owner === owner ? ledger.reservation.boundary : ledger.currentEnd;
+export function commitClaim(
+  ledger: WindowLedger,
+  owner: string,
+  claimedAt: number,
+): { ledger: WindowLedger; committed: boolean } {
+  if (!holdsReservation(ledger, owner, claimedAt)) {
+    return { ledger, committed: false };
+  }
+
+  const boundary = ledger.reservation!.boundary;
   const { start, end } = computeWindow(claimedAt);
+
   return {
-    currentStart: start,
-    currentEnd: end,
-    lastClaimedBoundary: boundary ?? floor10(claimedAt),
-    reservation: null,
-    source: 'claim',
+    ledger: {
+      currentStart: start,
+      currentEnd: end,
+      // A claim can never be at or after the window it opens. Unreachable while
+      // the reservation above is required — `boundary` is the old `currentEnd`
+      // and `end` is five hours past it — so this is defence in depth against a
+      // future change, not tested behaviour. `repairLedger` is the reachable
+      // safety net, and that one is tested.
+      lastClaimedBoundary: boundary < end ? boundary : null,
+      reservation: null,
+      source: 'claim',
+    },
+    committed: true,
   };
+}
+
+/**
+ * Undo an impossible ledger.
+ *
+ * `lastClaimedBoundary >= currentEnd` cannot happen legitimately — a claim
+ * opens a window five hours ahead of the boundary it spent. If it is ever seen,
+ * the ledger is corrupt and `nextBoundary` would return null for ever, so the
+ * claim stamp is dropped and the boundary becomes reachable again. Worst case
+ * that costs one extra claim; the alternative is a tool that never acts again.
+ */
+export function repairLedger(ledger: WindowLedger): WindowLedger {
+  if (
+    ledger.currentEnd !== null &&
+    ledger.lastClaimedBoundary !== null &&
+    ledger.lastClaimedBoundary >= ledger.currentEnd
+  ) {
+    return { ...ledger, lastClaimedBoundary: null };
+  }
+  return ledger;
 }
 
 /** Has the current window already expired as of `now`? */

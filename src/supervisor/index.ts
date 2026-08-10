@@ -27,6 +27,7 @@ import {
   computeWindow,
   deriveLedgerFromTurns,
   releaseReservation,
+  repairLedger,
   reserveBoundary,
   WINDOW_MS,
 } from '../window/ledger.js';
@@ -198,7 +199,10 @@ export async function tick(ctx: TickContext): Promise<ClaimDecision> {
   const observations = observe(readState(), ctx.actor.ownSessionId);
 
   const decision = await updateState((state) => {
-    let next = applyLiveness(state, observations);
+    // An impossible ledger (a claim at or after the window it opened) would
+    // otherwise make every boundary unreachable for ever.
+    let next: State = { ...state, ledger: repairLedger(state.ledger) };
+    next = applyLiveness(next, observations);
 
     for (const obs of observations) {
       if (!next.sessions[obs.sessionId]) continue;
@@ -235,9 +239,19 @@ export async function tick(ctx: TickContext): Promise<ClaimDecision> {
     const ok = await ctx.resume(decision.sessionId);
     await updateState((state) => {
       const session = state.sessions[decision.sessionId];
-      const ledger = ok
-        ? commitClaim(state.ledger, ctx.actor.id, Date.now())
-        : releaseReservation(state.ledger, ctx.actor.id);
+      let ledger = state.ledger;
+      if (ok) {
+        const commit = commitClaim(ledger, ctx.actor.id, Date.now());
+        ledger = commit.ledger;
+        if (!commit.committed) {
+          // Our hold lapsed while we were acting; another actor owns this
+          // boundary now. The continuation still happened, so it must still be
+          // counted — but the boundary is not ours to record.
+          logWarn('commit.lost_reservation', { sessionId: decision.sessionId });
+        }
+      } else {
+        ledger = releaseReservation(ledger, ctx.actor.id);
+      }
       const next: State = { ...state, ledger };
       if (session) {
         next.sessions = {
@@ -260,9 +274,11 @@ export async function tick(ctx: TickContext): Promise<ClaimDecision> {
   await mutateState((state) => {
     if (result.ok) {
       const stamped = Date.now();
+      const commit = commitClaim(state.ledger, ctx.actor.id, stamped);
+      if (!commit.committed) logWarn('commit.lost_reservation', { action: 'ping' });
       return {
         ...state,
-        ledger: commitClaim(state.ledger, ctx.actor.id, stamped),
+        ledger: commit.ledger,
         weekly: {
           ...state.weekly,
           // Trimmed on write as well as on read, so the list cannot grow without
