@@ -16,6 +16,22 @@ authority — see `README.md`. The notable reversals:
   time let an actor that could not act consume it, silently.
 - **Windows autostart** — `schtasks /SC ONLOGON` needs elevation; the Startup
   folder does not.
+- **`--no-session-persistence`** — a claim made with it left no transcript, so
+  the next process could not see that the boundary had been claimed and the
+  ledger was blind overnight. The claim now persists a session like any other.
+- **Idle claiming off by default** — reversed on the user's instruction: both
+  jobs are on after `ckm setup`, because a tool that needs a second decision to
+  do its job does not do its job. It stays bounded by a weekly cap and is
+  announced at setup, in `ckm status`, and in the log before each claim.
+- **Resume gated on a boundary** — resuming and claiming a boundary are now
+  separate decisions. Tying them together stranded a second waiting session,
+  which had a limit of its own to recover from and no boundary to ride in on.
+- **Nudging an already-open session (never shipped)** — built, then removed at
+  the user's direction: an open session may hold work in progress, and a new
+  throwaway session claims the boundary just as well without touching it.
+- **Codex support (never shipped)** — dropped after measurement. Codex's window
+  slides: `resets_at` is recomputed as `now + window` on every message, so there
+  is no fixed boundary to claim and nothing for this tool to do.
 
 What has held up, and is worth reading for: the derivation of the window model
 in §2 from 90 real `rate_limit` records, and the reasoning in §2.3 about why
@@ -162,7 +178,7 @@ src/
   window/
     ledger.ts     floor10 · +5h · boundary math          (pure)
     claimer.ts    resume-vs-ping decision                (pure)
-    ping.ts       minimal `claude --bare -p` claim
+    ping.ts       minimal `claude -p` claim  (--bare: superseded)
   state/store.ts  lock-protected JSON read-modify-write
   config/         defaults + load/save
   logger/         append-only JSONL audit log
@@ -201,6 +217,9 @@ Resuming *is* claiming. Never do both — that burns tokens for no gain.
 the lock plus the boundary stamp resolves it.
 
 ### 4.1 The ping must be tiny
+
+> **Superseded.** `--bare` cannot authenticate a subscription account, so
+> every claim failed with `Not logged in`. See the reversals at the top.
 
 The idle claim runs with `--bare`, which skips hooks, LSP, plugin sync,
 attribution, auto-memory, background prefetches, keychain reads, and CLAUDE.md
