@@ -284,6 +284,20 @@ const MUTATIONS = [
     expect: 'test/doctor.test.ts',
   },
   {
+    name: 'a newline in the configured continuation submits half a message',
+    file: 'src/config/index.ts',
+    find: "  out.continuationText = singleLine(out.continuationText, MAX_CONTINUATION, DEFAULT_CONFIG.continuationText);",
+    replace: "  if (out.continuationText.trim() === '') out.continuationText = DEFAULT_CONFIG.continuationText;",
+    expect: 'test/config.test.ts',
+  },
+  {
+    name: 'the config accepts a continuation the injector will refuse to type',
+    file: 'src/pty/inject.ts',
+    find: 'export const MAX_CONTINUATION_LENGTH = 500;',
+    replace: 'export const MAX_CONTINUATION_LENGTH = 2000;',
+    expect: 'test/config.test.ts test/inject.test.ts',
+  },
+  {
     name: 'a 24-hour reset string is unparseable (continuation never fires)',
     file: 'src/claude/resetparse.ts',
     find: `  if (!m) return parse24HourReset(text, now);`,

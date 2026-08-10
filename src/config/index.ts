@@ -17,6 +17,7 @@
 
 import fs from 'node:fs';
 import { configPath, ckmHome } from '../platform/paths.js';
+import { MAX_CONTINUATION_LENGTH } from '../pty/inject.js';
 
 export interface Config {
   /** Continue a wrapped session when its window reopens. */
@@ -69,7 +70,41 @@ const BOUNDS: Partial<Record<keyof Config, { min: number; max: number }>> = {
   maxIdleClaimsPerWeek: { min: 0, max: 100 },
 };
 
-/** Clamp numbers into range and drop anything of the wrong type. */
+/**
+ * These are one-line messages; anything longer is a mistake or a paste
+ * accident, and a long one is typed into a live terminal keystroke by
+ * keystroke.
+ *
+ * The continuation limit is the injector's own, not a second opinion. They were
+ * briefly different — 2000 here, 500 there — which meant a long continuation
+ * passed every check, was written to disk, and was then refused at the one
+ * moment it mattered: hours later, silently, with auto-continue simply never
+ * happening.
+ */
+const MAX_CONTINUATION = MAX_CONTINUATION_LENGTH;
+const MAX_PING = 200;
+
+/**
+ * Reduce a configured message to something safe to send as one message.
+ *
+ * Control characters are removed rather than escaped: there is no meaningful
+ * way to type ESC or a carriage return into a TUI's input box, and both do
+ * something — Enter submits, ESC begins an escape sequence.
+ */
+function singleLine(value: string, max: number, fallback: string): string {
+  const stripped = value
+    // eslint-disable-next-line no-control-regex
+    .replace(/[\u0000-\u001f\u007f]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, max)
+    .trim();
+  // An empty message would submit a blank line into the user's session.
+  return stripped === '' ? fallback : stripped;
+}
+
+/** Clamp numbers into range, drop anything of the wrong type, and make the two
+ * message settings safe to send. */
 export function sanitiseConfig(input: Partial<Config>): Config {
   const out: Config = { ...DEFAULT_CONFIG };
   for (const key of configKeys()) {
@@ -87,9 +122,16 @@ export function sanitiseConfig(input: Partial<Config>): Config {
       (out[key] as Config[keyof Config]) = value as Config[keyof Config];
     }
   }
-  // An empty continuation would submit a blank line into the user's session.
-  if (out.continuationText.trim() === '') out.continuationText = DEFAULT_CONFIG.continuationText;
-  if (out.pingText.trim() === '') out.pingText = DEFAULT_CONFIG.pingText;
+  // Both of these are typed or passed as a single message, so a control
+  // character in either is not cosmetic.
+  //
+  // A newline in `continuationText` is the dangerous one: Enter is *submit* in
+  // Claude Code's input box, so "please\ncontinue" would send "please" on its
+  // own and then type "continue" into a session that is already working —
+  // exactly the interruption the draft guard exists to prevent, arriving from
+  // the config file instead of from the user.
+  out.continuationText = singleLine(out.continuationText, MAX_CONTINUATION, DEFAULT_CONFIG.continuationText);
+  out.pingText = singleLine(out.pingText, MAX_PING, DEFAULT_CONFIG.pingText);
   return out;
 }
 

@@ -25,9 +25,19 @@ const ENTER = '\r';
  */
 const CONTROL_CHARS = /[\u0000-\u001f\u007f]/;
 
+/**
+ * The longest continuation we are willing to type into somebody's terminal.
+ *
+ * Exported because the config sanitiser must truncate to exactly this: it used
+ * to allow four times as much, so a long continuation passed every validation,
+ * was written to disk, and was then refused here at the moment it mattered —
+ * hours later, silently, with auto-continue simply never happening.
+ */
+export const MAX_CONTINUATION_LENGTH = 500;
+
 /** Reject anything that is not a single plain line of text. */
 export function isSafeContinuation(text: string): boolean {
-  if (text.length === 0 || text.length > 500) return false;
+  if (text.length === 0 || text.length > MAX_CONTINUATION_LENGTH) return false;
   return !CONTROL_CHARS.test(text);
 }
 

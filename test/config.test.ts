@@ -4,7 +4,7 @@
 
 import { describe, expect, it } from 'vitest';
 import { coerceConfigValue, DEFAULT_CONFIG, sanitiseConfig } from '../src/config/index.js';
-import { isSafeContinuation } from '../src/pty/inject.js';
+import { isSafeContinuation, MAX_CONTINUATION_LENGTH } from '../src/pty/inject.js';
 
 describe('sanitiseConfig', () => {
   it('returns defaults for an empty object', () => {
@@ -102,5 +102,74 @@ describe('coerceConfigValue', () => {
 
   it('accepts in-range numbers', () => {
     expect(coerceConfigValue('pollIntervalMs', '30000')).toBe(30_000);
+  });
+});
+
+/**
+ * The two settings that become a message.
+ *
+ * `continuationText` is typed into a live terminal keystroke by keystroke, and
+ * Enter is submit in Claude Code's input box — so a newline in the config file
+ * does not produce a two-line message, it produces two messages, the second of
+ * which is typed into a session that has already started working. That is the
+ * exact interruption the draft guard exists to prevent, arriving from the
+ * config file rather than from a person.
+ */
+describe('configured messages are reduced to one safe line', () => {
+  const CR = '\r';
+  const ESC = '\u001b';
+  // eslint-disable-next-line no-control-regex
+  const CONTROL = /[\u0000-\u001f\u007f]/;
+
+  it('a newline in the continuation becomes a space, not a submit', () => {
+    expect(sanitiseConfig({ continuationText: 'please\ncontinue' }).continuationText).toBe(
+      'please continue',
+    );
+  });
+
+  it('carriage returns and escape sequences are stripped too', () => {
+    // CR is Enter; ESC begins an escape sequence the TUI will act on.
+    const c = sanitiseConfig({ continuationText: `go${CR}${ESC}[Aon` });
+    expect(c.continuationText).toBe('go [Aon');
+    // eslint-disable-next-line no-control-regex
+    expect(c.continuationText).not.toMatch(CONTROL);
+  });
+
+  it('the ping is cleaned the same way', () => {
+    expect(sanitiseConfig({ pingText: 'ok\nthen' }).pingText).toBe('ok then');
+  });
+
+  it('a message of only control characters falls back to the default', () => {
+    // Stripping first and checking emptiness afterwards is what makes this
+    // safe; the previous order let a lone newline through.
+    const c = sanitiseConfig({ continuationText: `\n${CR}\t`, pingText: ' ' });
+    expect(c.continuationText).toBe(DEFAULT_CONFIG.continuationText);
+    expect(c.pingText).toBe(DEFAULT_CONFIG.pingText);
+  });
+
+  it('an enormous paste is truncated to what the injector will accept', () => {
+    const c = sanitiseConfig({ continuationText: 'x'.repeat(50_000) });
+    expect(c.continuationText.length).toBe(MAX_CONTINUATION_LENGTH);
+    expect(isSafeContinuation(c.continuationText)).toBe(true);
+  });
+
+  it('leaves an ordinary message exactly as written', () => {
+    const text = 'continue where you left off';
+    expect(sanitiseConfig({ continuationText: text }).continuationText).toBe(text);
+  });
+
+  it('is idempotent, so a cleaned value survives save and load', () => {
+    const once = sanitiseConfig({ continuationText: 'a\nb' }).continuationText;
+    expect(sanitiseConfig({ continuationText: once }).continuationText).toBe(once);
+  });
+
+  it('what comes out is what the injector considers safe to type', () => {
+    // The two guards must agree. If sanitising let something through that the
+    // injector then refuses, auto-continue silently stops working.
+    for (const raw of ['please\ncontinue', `hi${CR}there`, 'x'.repeat(5000)]) {
+      expect(isSafeContinuation(sanitiseConfig({ continuationText: raw }).continuationText)).toBe(
+        true,
+      );
+    }
   });
 });
