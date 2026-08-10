@@ -31,6 +31,9 @@ import os from 'node:os';
 import { locateClaude } from '../claude/locate.js';
 import { spawnClaude } from '../claude/spawn.js';
 import { classifyFailure, type FailureClass } from '../claude/failure.js';
+import { classifyLimitText } from '../claude/limits.js';
+import { parseAnyReset } from '../claude/resetparse.js';
+import type { LimitEvent } from '../state/schema.js';
 import { logAction, logError, logInfo, logWarn } from '../logger/index.js';
 
 export interface PingResult {
@@ -38,6 +41,15 @@ export interface PingResult {
   detail: string;
   /** Present when the request failed; decides whether retrying is worthwhile. */
   failure?: FailureClass;
+  /**
+   * A usage limit reported by the claim itself.
+   *
+   * The daemon reads limits from *supervised sessions'* transcripts, and
+   * overnight there are none — so a limit that the claim runs into was
+   * previously invisible. It retried three times every boundary until the cap
+   * cleared, which for a weekly cap is thousands of refused requests.
+   */
+  limit?: LimitEvent;
 }
 
 /**
@@ -76,6 +88,27 @@ export function pingArgs(text: string): string[] {
     '-p',
     text,
   ];
+}
+
+/**
+ * Read a usage limit out of what the invocation printed, if there is one.
+ *
+ * The wording is the same as in a transcript; only the delivery differs.
+ */
+export function limitFromOutput(stdout: string, stderr: string, now: Date): LimitEvent | null {
+  const text = [stdout, stderr].join('\n').trim();
+  const kind = classifyLimitText(text);
+  if (kind === null) return null;
+  const resetAt = kind === 'model' ? null : (parseAnyReset(text, now)?.getTime() ?? null);
+  return { kind, detectedAt: now.getTime(), resetAt, raw: firstLine(text) };
+}
+
+function firstLine(text: string): string {
+  for (const line of text.split('\n')) {
+    const trimmed = line.trim();
+    if (trimmed.length > 0) return trimmed.slice(0, 200);
+  }
+  return text.slice(0, 200);
 }
 
 /**
@@ -154,8 +187,14 @@ export function sendPing(text: string, timeoutMs = 60_000): Promise<PingResult> 
         return;
       }
       const failure = classifyFailure(code, stdout, stderr);
-      logError('ping.failed', { code, kind: failure.kind, detail: failure.detail });
-      finish({ ok: false, detail: failure.detail, failure });
+      const limit = limitFromOutput(stdout, stderr, new Date()) ?? undefined;
+      logError('ping.failed', {
+        code,
+        kind: failure.kind,
+        detail: failure.detail,
+        limit: limit?.kind,
+      });
+      finish({ ok: false, detail: failure.detail, failure, limit });
     });
   });
 }
@@ -183,6 +222,12 @@ export async function sendPingWithRetry(
 
     if (last.failure?.kind === 'terminal') {
       logWarn('ping.terminal_failure', { detail: last.failure.detail, reason: last.failure.reason });
+      return last;
+    }
+    if (last.limit) {
+      // The window is not open after all. Retrying cannot change that, and the
+      // caller will fold the stated reset into the ledger.
+      logWarn('ping.hit_limit', { kind: last.limit.kind });
       return last;
     }
     if (i < attempts - 1) {

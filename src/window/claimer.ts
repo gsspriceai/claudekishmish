@@ -116,11 +116,12 @@ export function decideClaim(
   now: number,
   actor: Actor,
 ): ClaimDecision {
-  if (state.halted) {
-    return {
-      action: 'none',
-      reason: `halted: ${state.halted.detail} (fix it, then \`ckm resume --all\`)`,
-    };
+  if (state.halted && (state.halted.expiresAt === null || now < state.halted.expiresAt)) {
+    const until =
+      state.halted.expiresAt === null
+        ? 'fix it, then `ckm resume --all`'
+        : `lifts by itself at ${new Date(state.halted.expiresAt).toLocaleTimeString()}`;
+    return { action: 'none', reason: `halted: ${state.halted.detail} (${until})` };
   }
   if (state.globalPaused) {
     return { action: 'none', reason: 'paused globally (ckm resume --all to re-enable)' };

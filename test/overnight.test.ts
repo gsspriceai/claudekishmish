@@ -161,6 +161,52 @@ describe('nobody is at the machine', () => {
     expect(readState().ledger.lastClaimedBoundary).toBeNull();
   });
 
+  /**
+   * A limit the claim itself runs into used to be invisible: limits were read
+   * only from *supervised sessions'* transcripts, and overnight there are none.
+   * The daemon retried three times every boundary until the cap cleared — for a
+   * weekly cap, thousands of refused requests.
+   */
+  it('absorbs a weekly limit that the claim itself runs into', async () => {
+    await seedExpiredWindow();
+    process.env.FAKE_FAIL_TEXT =
+      "You've hit your weekly limit · resets Aug 12, 10:30pm (Asia/Calcutta)";
+
+    const decision = await tick({
+      actor: { id: 'd', ownSessionId: null },
+      resume: async () => false,
+      config,
+    });
+    delete process.env.FAKE_FAIL_TEXT;
+
+    expect(decision.action).toBe('ping');
+    const after = readState();
+    // Claiming suspends until the stated reset, instead of retrying every tick.
+    expect(after.weekly.suspendedUntil).not.toBeNull();
+    expect(after.weekly.suspendedUntil!).toBeGreaterThan(Date.now());
+    // And a request that did not land must not spend the boundary.
+    expect(after.ledger.lastClaimedBoundary).toBeNull();
+    expect(after.weekly.idleClaims).toHaveLength(0);
+  });
+
+  it('stops trying once a weekly limit has been absorbed', async () => {
+    await seedExpiredWindow();
+    process.env.FAKE_FAIL_TEXT =
+      "You've hit your weekly limit · resets Aug 12, 10:30pm (Asia/Calcutta)";
+    await tick({ actor: { id: 'd', ownSessionId: null }, resume: async () => false, config });
+    delete process.env.FAKE_FAIL_TEXT;
+
+    // The next tick must not spawn anything at all.
+    fs.rmSync(argsFile, { force: true });
+    const again = await tick({
+      actor: { id: 'd', ownSessionId: null },
+      resume: async () => false,
+      config,
+    });
+    expect(again.action).toBe('none');
+    expect(fs.existsSync(argsFile)).toBe(false);
+  });
+
   it('does not claim when the weekly cap is spent', async () => {
     await seedExpiredWindow();
     const now = Date.now();

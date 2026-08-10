@@ -40,6 +40,7 @@ import {
   userTurnTimes,
 } from '../claude/transcript.js';
 import { checkSessionLiveness, readSessionFiles, type LivenessResult } from '../claude/sessions.js';
+import { haltExpiry } from '../claude/failure.js';
 
 /** How many consecutive unreadable liveness checks before we give up on a session. */
 const MAX_MISSED_LIVENESS = 5;
@@ -287,14 +288,24 @@ export async function tick(ctx: TickContext): Promise<ClaimDecision> {
         },
       };
     }
-    const next: State = { ...state, ledger: releaseReservation(state.ledger, ctx.actor.id) };
+    let next: State = { ...state, ledger: releaseReservation(state.ledger, ctx.actor.id) };
+
+    // A limit the claim itself ran into is otherwise invisible: overnight there
+    // is no supervised session whose transcript would carry it, so the daemon
+    // would retry every boundary until the cap cleared.
+    if (result.limit) {
+      next = absorbLimit(next, null, result.limit, Date.now());
+    }
+
     if (result.failure?.kind === 'terminal') {
       // Retrying cannot fix this, and a daemon repeating it forever is noise
       // nobody reads. Stop, and make the reason impossible to miss.
+      const at = Date.now();
       next.halted = {
         reason: result.failure.reason,
-        detectedAt: Date.now(),
+        detectedAt: at,
         detail: result.failure.detail,
+        expiresAt: haltExpiry(result.failure.reason, at),
       };
     }
     return next;

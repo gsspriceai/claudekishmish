@@ -226,11 +226,43 @@ describe('decideClaim', () => {
   it('does nothing at all once halted', () => {
     // An ended subscription must stop the tool, not make it retry for ever.
     const state = stateWithBoundaryDue([session()], {
-      halted: { reason: 'subscription', detectedAt: NOW - 1000, detail: 'subscription has ended' },
+      halted: {
+        reason: 'subscription',
+        detectedAt: NOW - 1000,
+        detail: 'subscription has ended',
+        expiresAt: null,
+      },
     });
     const d = decideClaim(state, withIdle, NOW, WRAPPER);
     expect(d.action).toBe('none');
     expect(d.reason).toMatch(/halted/);
+  });
+
+  it('a self-clearing halt stops blocking once it expires', () => {
+    // A per-model cap lifts on its own. Making the user notice a status line and
+    // type a command would strand the tool for no reason.
+    const halted = stateWithBoundaryDue([], {
+      halted: {
+        reason: 'model',
+        detectedAt: NOW - 1000,
+        detail: 'reached your Fable 5 limit',
+        expiresAt: NOW + 3600_000,
+      },
+    });
+    expect(decideClaim(halted, withIdle, NOW, DAEMON).action).toBe('none');
+    expect(decideClaim(halted, withIdle, NOW + 3600_001, DAEMON).action).toBe('ping');
+  });
+
+  it('says when a halt will lift by itself, and when it will not', () => {
+    const selfClearing = stateWithBoundaryDue([], {
+      halted: { reason: 'model', detectedAt: NOW, detail: 'model cap', expiresAt: NOW + 60_000 },
+    });
+    expect(decideClaim(selfClearing, withIdle, NOW, DAEMON).reason).toMatch(/lifts by itself/);
+
+    const permanent = stateWithBoundaryDue([], {
+      halted: { reason: 'auth', detectedAt: NOW, detail: 'Not logged in', expiresAt: null },
+    });
+    expect(decideClaim(permanent, withIdle, NOW, DAEMON).reason).toMatch(/ckm resume --all/);
   });
 
   it('does not resume when auto-continue is switched off', () => {

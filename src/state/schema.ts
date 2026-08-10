@@ -114,13 +114,22 @@ export interface WeeklyState {
  *
  * If the account is logged out, the subscription has ended, or the credentials
  * are rejected, every future request will fail the same way. Continuing to ping
- * would be pointless noise, so the tool halts and says so until a human fixes
- * it.
+ * would be pointless noise, so the tool halts and says so.
+ *
+ * Some halts clear themselves — see `expiresAt`.
  */
 export interface HaltState {
-  reason: 'auth' | 'subscription' | 'unknown';
+  reason: 'auth' | 'subscription' | 'model' | 'unknown';
   detectedAt: number;
   detail: string;
+  /**
+   * When the halt lifts by itself, or `null` if only a human can clear it.
+   *
+   * A per-model cap clears on its own, so making the user notice a line in
+   * `ckm status` and type a command would strand the tool for no reason. A
+   * logged-out account will not fix itself, so that one waits for a person.
+   */
+  expiresAt: number | null;
 }
 
 export interface State {
