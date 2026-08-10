@@ -16,6 +16,7 @@
 import { StringDecoder } from 'node:string_decoder';
 import { spawn as spawnChild, type ChildProcess } from 'node:child_process';
 import { toLaunchable } from '../claude/spawn.js';
+import { logWarn } from '../logger/index.js';
 
 export interface PtySession {
   /** PID of the spawned `claude`. */
@@ -198,19 +199,49 @@ export async function spawnPty(
    * have seen unsupervised.
    */
   usePty = true,
+  /**
+   * The node-pty module to use. Injectable so a test can drive the failure this
+   * guards against — a module that loads and then throws on `spawn`, which is
+   * exactly what macOS does and what no test could reach otherwise.
+   */
+  ptyModule?: NodePtyModule | null,
 ): Promise<PtySession> {
-  const pty = usePty ? await loadNodePty() : null;
+  const pty = usePty ? (ptyModule !== undefined ? ptyModule : await loadNodePty()) : null;
   const env = childEnv(extraEnv);
 
+  // Loading node-pty is not the same as being able to use it.
+  //
+  // On macOS the module loads fine and `spawn` throws `posix_spawnp failed`,
+  // because node-pty ships its `spawn-helper` non-executable in the darwin
+  // prebuilds and only the macOS code path execs that helper. Unguarded, the
+  // throw escaped a top-level await and killed the process — so installing this
+  // tool made every interactive `claude` on macOS die with a stack trace, while
+  // `ckm doctor` reported node-pty as available.
+  //
+  // Any PTY allocation failure — a sandbox, fd exhaustion, a future regression —
+  // now degrades to the inherited-stdio path instead of taking the user's
+  // `claude` down with it.
+  let proc: NodePtyProcess | null = null;
   if (pty) {
-    const proc = pty.spawn(bin, args, {
-      name: process.env.TERM ?? 'xterm-256color',
-      cols: process.stdout.columns ?? 80,
-      rows: process.stdout.rows ?? 30,
-      cwd,
-      env,
-      useConpty: process.platform === 'win32' ? undefined : false,
-    });
+    try {
+      proc = pty.spawn(bin, args, {
+        name: process.env.TERM ?? 'xterm-256color',
+        cols: process.stdout.columns ?? 80,
+        rows: process.stdout.rows ?? 30,
+        cwd,
+        env,
+      });
+    } catch (err) {
+      logWarn('pty.spawn_failed', {
+        message: (err as Error).message,
+        note: 'falling back to inherited stdio; in-place continuation is unavailable',
+      });
+      proc = null;
+    }
+  }
+
+  if (proc) {
+    const term = proc;
 
     const dataHandlers: ((chunk: string) => void)[] = [];
     const exitHandlers: ((code: number) => void)[] = [];
@@ -222,7 +253,7 @@ export async function spawnPty(
      */
     let exitedWith: number | null = null;
 
-    proc.onData((chunk) => {
+    term.onData((chunk) => {
       process.stdout.write(chunk);
       for (const h of dataHandlers) h(chunk);
     });
@@ -236,7 +267,7 @@ export async function spawnPty(
       const text = decoder.write(buf);
       if (text.length === 0) return;
       draft.observe(text);
-      proc.write(text);
+      term.write(text);
     };
 
     const wasRaw = input.isTTY ? Boolean(input.isRaw) : false;
@@ -244,10 +275,10 @@ export async function spawnPty(
     input.resume();
     input.on('data', onStdin);
 
-    const onResize = () => proc.resize(process.stdout.columns ?? 80, process.stdout.rows ?? 30);
+    const onResize = () => term.resize(process.stdout.columns ?? 80, process.stdout.rows ?? 30);
     process.stdout.on('resize', onResize);
 
-    proc.onExit(({ exitCode }) => {
+    term.onExit(({ exitCode }) => {
       input.off('data', onStdin);
       process.stdout.off('resize', onResize);
       if (input.isTTY) input.setRawMode?.(wasRaw);
@@ -257,11 +288,11 @@ export async function spawnPty(
     });
 
     return {
-      pid: proc.pid,
+      pid: term.pid,
       canInject: true,
       hasDraftInput: () => draft.isDirty(),
       write: (data: string) => {
-        proc.write(data);
+        term.write(data);
         // Our own text is not the user's typing; do not let it look like a draft.
         draft.reset();
         return true;
@@ -271,8 +302,8 @@ export async function spawnPty(
         if (exitedWith !== null) cb(exitedWith);
         else exitHandlers.push(cb);
       },
-      resize: (cols, rows) => proc.resize(cols, rows),
-      kill: () => proc.kill(),
+      resize: (cols, rows) => term.resize(cols, rows),
+      kill: () => term.kill(),
     };
   }
 

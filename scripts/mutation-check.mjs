@@ -62,8 +62,8 @@ const MUTATIONS = [
   {
     name: 'P0-3  ckm wrap never exits',
     file: 'src/cli/index.ts',
-    find: `    process.exit(code);`,
-    replace: `    process.exitCode = code;`,
+    find: `  process.exit(code);`,
+    replace: `  process.exitCode = code;`,
     expect: 'test/integration.test.ts',
   },
   {
@@ -249,10 +249,16 @@ const MUTATIONS = [
 ];
 
 let survived = 0;
+let skipped = 0;
 for (const m of MUTATIONS) {
   const original = fs.readFileSync(m.file, 'utf8');
   if (!original.includes(m.find)) {
+    // A skip is a failure, not a note. An anchor rots the moment the code it
+    // points at is reformatted, and a silently-skipped mutation is an untested
+    // defect wearing a tested defect's name — the exact failure this script
+    // exists to catch, occurring inside the script itself.
     console.log(`SKIP  ${m.name}\n      (anchor not found in ${m.file})`);
+    skipped++;
     continue;
   }
   fs.writeFileSync(m.file, original.replace(m.find, m.replace), 'utf8');
@@ -272,4 +278,15 @@ for (const m of MUTATIONS) {
 }
 
 execSync('npm run build', { stdio: 'pipe' });
-console.log(`\n${survived === 0 ? 'All mutations caught.' : `${survived} mutation(s) SURVIVED — those tests prove nothing.`}`);
+
+const problems = [];
+if (survived > 0) problems.push(`${survived} SURVIVED — those tests prove nothing`);
+if (skipped > 0) problems.push(`${skipped} SKIPPED — those anchors have rotted and check nothing`);
+
+console.log('');
+if (problems.length === 0) {
+  console.log(`All ${MUTATIONS.length} mutations caught.`);
+} else {
+  console.log(problems.join('\n'));
+  process.exitCode = 1;
+}

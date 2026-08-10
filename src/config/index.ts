@@ -40,8 +40,6 @@ export interface Config {
   maxResumesPerSession: number;
   /** Hard cap on idle claims in any rolling 7 days. */
   maxIdleClaimsPerWeek: number;
-  /** Log every automatic action before performing it. */
-  auditLog: boolean;
 }
 
 export const DEFAULT_CONFIG: Config = {
@@ -54,7 +52,6 @@ export const DEFAULT_CONFIG: Config = {
   pollIntervalMs: 10_000,
   maxResumesPerSession: 3,
   maxIdleClaimsPerWeek: 14,
-  auditLog: true,
 };
 
 /**

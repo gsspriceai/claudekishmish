@@ -14,7 +14,7 @@ import os from 'node:os';
 
 const dist = (p) => 'file:///' + path.resolve('dist', p).replace(/\\/g, '/');
 const { toLimitEvent } = await import(dist('claude/limits.js'));
-const { computeWindow, floor10, WINDOW_MS } = await import(dist('window/ledger.js'));
+const { computeWindow, WINDOW_MS } = await import(dist('window/ledger.js'));
 
 const projects = process.env.CLAUDE_CONFIG_DIR
   ? path.join(process.env.CLAUDE_CONFIG_DIR, 'projects')
@@ -92,4 +92,3 @@ console.log(
       ? 'not enough overlapping data to judge the model here'
       : 'MODEL DISAGREES with real history — investigate before trusting the ledger',
 );
-void floor10;

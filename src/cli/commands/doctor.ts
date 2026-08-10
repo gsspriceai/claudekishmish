@@ -13,6 +13,7 @@
 
 import fs from 'node:fs';
 import { locateClaude } from '../../claude/locate.js';
+import { spawnSync } from 'node:child_process';
 import { spawnClaudeSync } from '../../claude/spawn.js';
 import { claudeProjectsDir, claudeSessionsDir, ckmHome, daemonLockPath } from '../../platform/paths.js';
 import { liveTerminalSessions, pidAlive } from '../../claude/sessions.js';
@@ -21,6 +22,62 @@ import { planService } from '../../platform/service.js';
 import { loadNodePty } from '../../pty/host.js';
 import { readState } from '../../state/store.js';
 import { haltAdvice } from '../../claude/failure.js';
+
+/**
+ * Can we actually allocate a pseudo-terminal on this machine, right now?
+ *
+ * Probed by allocating one, not by loading the module. On macOS node-pty loads
+ * perfectly and then throws on `spawn`, because it ships its `spawn-helper`
+ * non-executable in the darwin prebuilds — so a load-only check reported
+ * "available" on the one platform where in-place continuation is completely
+ * broken, pointing the user away from the fault in the single command they run
+ * when it misbehaves.
+ *
+ * Run in a child process with its output captured: node-pty spawns a console
+ * helper of its own that prints to stderr in some environments, and a
+ * diagnostic that emits a stack trace while reporting success is worse than no
+ * diagnostic.
+ */
+async function probePty(): Promise<{ ok: boolean; detail: string }> {
+  if (!(await loadNodePty())) {
+    return {
+      ok: false,
+      detail:
+        'not installed — supervision and boundary claiming still work, but a session cannot be continued in its own terminal',
+    };
+  }
+
+  const script = [
+    "const pty = require('node-pty');",
+    "const p = pty.spawn(process.execPath, ['-e', '0'], { cols: 80, rows: 24, cwd: require('os').tmpdir() });",
+    'p.kill();',
+    'process.exit(0);',
+  ].join('\n');
+
+  const probe = spawnSync(process.execPath, ['-e', script], {
+    encoding: 'utf8',
+    timeout: 20_000,
+    cwd: process.cwd(),
+    windowsHide: true,
+  });
+
+  if (probe.status === 0) {
+    return { ok: true, detail: 'available — sessions can be continued in place' };
+  }
+  const why = firstLine(`${probe.stderr ?? ''}`) || `exit ${probe.status ?? 'null'}`;
+  return {
+    ok: false,
+    detail: `loads but cannot allocate a pty (${why}) — supervision and claiming still work; in-place continuation does not`,
+  };
+}
+
+function firstLine(text: string): string {
+  for (const line of text.split('\n')) {
+    const t = line.trim();
+    if (t.length > 0 && !t.startsWith('at ')) return t.slice(0, 120);
+  }
+  return '';
+}
 
 interface Check {
   name: string;
@@ -100,13 +157,17 @@ export async function runDoctor(): Promise<number> {
   }
   checks.push({ name: 'state directory writable', ok: writable, detail: ckmHome(), fatal: true });
 
-  const pty = await loadNodePty();
+  // Probed by allocating one, not by loading the module.
+  //
+  // On macOS node-pty loads perfectly and then throws on `spawn`, so a
+  // load-only check reported "available" on the one platform where in-place
+  // continuation is completely broken — pointing the user away from the fault
+  // in the single command they run when it misbehaves.
+  const ptyProbe = await probePty();
   checks.push({
     name: 'node-pty',
-    ok: pty !== null,
-    detail: pty
-      ? 'available — sessions can be continued in place'
-      : 'unavailable — supervision and claiming still work, but a session cannot be continued in its own terminal',
+    ok: ptyProbe.ok,
+    detail: ptyProbe.detail,
     fatal: false,
   });
 

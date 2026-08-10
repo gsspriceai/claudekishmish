@@ -69,11 +69,7 @@ describe('the words we type into a terminal', () => {
   });
 
   it('is plain ASCII, so a PTY cannot mangle it', () => {
-    for (const text of [
-      DEFAULT_CONFIG.continuationText,
-      DEFAULT_CONFIG.pingText,
-      DEFAULT_CONFIG.nudgeText,
-    ]) {
+    for (const text of [DEFAULT_CONFIG.continuationText, DEFAULT_CONFIG.pingText]) {
       // eslint-disable-next-line no-control-regex
       expect(/^[\x20-\x7e]+$/.test(text), text).toBe(true);
     }

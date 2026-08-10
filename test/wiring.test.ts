@@ -269,9 +269,12 @@ describe('the claim runs nowhere near a project', () => {
     // Anywhere with a CLAUDE.md or project settings changes the prompt, misses
     // the prompt cache, and costs roughly ten times as much per the measurement
     // in the README.
+    // realpath, not resolve: macOS symlinks /var to /private/var, so the same
+    // directory compares unequal to itself without it.
+    const real = (p: string) => fs.realpathSync.native(path.resolve(p));
     const where = fs.readFileSync(cwdFile, 'utf8').trim();
-    expect(path.resolve(where)).toBe(path.resolve(os.tmpdir()));
-    expect(path.resolve(where)).not.toBe(path.resolve(os.homedir()));
+    expect(real(where)).toBe(real(os.tmpdir()));
+    expect(real(where)).not.toBe(real(os.homedir()));
   });
 
   it('asks for no MCP servers and no skills', () => {

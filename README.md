@@ -8,7 +8,9 @@ npm i -g claudekishmish
 ckm setup
 ```
 
-Windows, macOS and Linux.
+Windows, macOS and Linux — with one caveat on macOS, below.
+
+[![CI](https://github.com/gsspriceai/claudekishmish/actions/workflows/ci.yml/badge.svg)](https://github.com/gsspriceai/claudekishmish/actions/workflows/ci.yml)
 
 ---
 
@@ -51,12 +53,17 @@ window prediction  : 80/80 exact
 ```
 
 Every reset time Claude Code has ever stated on that machine landed on a
-10-minute grid — `{:00, :10, :20, :30, :40, :50}`, zero exceptions. Reproduce it
-on your own history:
+10-minute grid — `{:00, :10, :20, :30, :40, :50}`, zero exceptions.
+
+Check the model against your own history, from a git checkout:
 
 ```bash
-npm run verify:history        # or: node scripts/verify-against-real-history.mjs
+npm run verify:history
 ```
+
+That reproduces the four numbers above — limits detected, resets read, grid
+alignment, prediction accuracy. It does **not** reproduce the "62 of 71" figure,
+which came from a separate one-off analysis of boundary gaps.
 
 ## What it cannot do: a sleeping machine
 
@@ -73,6 +80,29 @@ What the tool does guarantee is that waking up is handled sanely: it claims
 the grid from the moment it actually sent something.
 
 If you want the countdown to survive the night, the machine has to stay awake.
+
+## macOS: in-place continuation needs one extra step
+
+`node-pty` 1.1.0 ships its `spawn-helper` **non-executable** in the darwin
+prebuilds, and macOS is the only platform whose code path executes that helper.
+So on a stock `npm i -g`, allocating a PTY fails with `posix_spawnp failed`.
+
+The tool degrades rather than breaking: boundary claiming, limit detection and
+every command keep working, and `claude` itself is unaffected. What you lose is
+in-place continuation — the thing that types into your terminal.
+
+To get it, install so node-pty builds from source (needs Xcode command line
+tools):
+
+```bash
+npm_config_build_from_source=true npm i -g claudekishmish
+```
+
+`ckm doctor` tells you which mode you are in — it allocates a real PTY rather
+than just loading the module, because on macOS the module loads perfectly and
+then refuses to spawn.
+
+Reported upstream; this section goes away when it is fixed.
 
 ## Three limits, three responses
 
@@ -95,8 +125,12 @@ request several times a day for ever. `ckm status` says so in the first line, an
 Measured against a real subscription account:
 
 ```
-input 2 · cache_read 21,963 · output 13 · ~5.6s      (~$0.023 at API rates)
+input 2 · cache_read 21,963 · output 13 · ~5.6s
 ```
+
+At API rates that is roughly **$0.007 on Sonnet, $0.011 on Opus, $0.023 on
+Fable** — the tier matters, so take the one you actually run. On a subscription
+it costs you window allowance rather than money.
 
 A claim is a real, persisted session — it creates one transcript with one
 timestamped turn. That is deliberate: the window a claim opens is only visible
@@ -122,10 +156,11 @@ ckm setup              # install the shim + write the service unit
 ckm status             # windows, boundaries, sessions, next action
 ckm pause              # stop auto-continuing this session
 ckm pause --all        # stop everything (before you go to sleep)
+ckm pause --session ID # target one session by id, from anywhere
 ckm resume [--all]     # switch it back on; also clears a halt
 ckm claim on|off       # boundary claiming when nothing is pending
-ckm doctor             # check every dependency, and actually run claude
-ckm logs [-n]          # what it did while you were away
+ckm doctor             # check every dependency, by running them (no billable request)
+ckm logs [-n <count>]  # what it did while you were away
 ckm config get|set     # settings
 ckm shim               # where the shim is, and how to put it on PATH
 ckm uninstall          # remove the shim and the service unit
@@ -178,8 +213,11 @@ more than the features.
    boundary, then convert it to a claim after the request succeeds, and release
    it otherwise — so a failure can never burn a window while reporting a healthy
    one.
-6. **Hard caps.** Three auto-continues per session, fourteen idle claims per
-   week, both enforced in one place.
+6. **Bounded by default.** Three auto-continues per supervised session and
+   fourteen idle claims per rolling week, enforced in one place. They are
+   defaults, not ceilings — `ckm config set` can raise them — and the per-session
+   count lives with the session record, so quitting and reopening starts it
+   again.
 7. **Real kill switch.** `ckm pause` is re-checked on every tick *and* again in
    the instant before anything is typed.
 8. **Nothing leaves your machine.** No credentials are read, stored or
@@ -231,7 +269,7 @@ land in the degraded mode.
 ```bash
 npm install
 npm run build
-npm test          # 257 tests
+npm test          # 262 tests
 ```
 
 Correctness lives in pure functions (`window/ledger.ts`, `window/claimer.ts`),
