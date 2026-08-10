@@ -130,17 +130,25 @@ describe('repairSpawnHelper', () => {
 });
 
 describe('the repair is wired into the load path', () => {
-  it('runs before node-pty is handed to a caller', async () => {
+  it('runs before node-pty is handed to a caller, and only if there is one', async () => {
     // The macOS breakage survived three audits as a *missing call*, not as
     // wrong logic. A repair nobody invokes fixes nothing.
+    //
+    // Both directions matter, and node-pty is an optional dependency, so which
+    // one applies depends on the environment: CI runs this suite a second time
+    // with node-pty uninstalled. Repairing a module that is not installed would
+    // mean chmod-ing a path guessed from nothing.
     let called = 0;
     const mod = await loadNodePty(() => {
       called++;
     });
 
-    expect(called).toBe(1);
-    // And it must still return the module, not swallow it.
-    expect(mod === null || typeof mod.spawn === 'function').toBe(true);
+    if (mod === null) {
+      expect(called, 'nothing to repair when node-pty is absent').toBe(0);
+    } else {
+      expect(called, 'the repair must run before the module is used').toBe(1);
+      expect(typeof mod.spawn).toBe('function');
+    }
   });
 });
 
