@@ -31,7 +31,7 @@ unclaimed.**
 | | |
 |---|---|
 | **Continues your work** | When the window reopens, the continuation is typed into *your actual terminal session* — same window, same context, work carries on. On by default. |
-| **Claims boundaries** | The moment a window expires, a minimal request starts the next countdown, so the clock never stops. On by default; capped, announced at setup, and every claim is logged. |
+| **Claims boundaries** | The moment a window expires, a minimal request starts the next countdown. On by default; capped, announced at setup, and every claim is logged. |
 
 ## Verified, not assumed
 
@@ -57,6 +57,22 @@ on your own history:
 ```bash
 npm run verify:history        # or: node scripts/verify-against-real-history.mjs
 ```
+
+## What it cannot do: a sleeping machine
+
+Nothing runs while the machine is suspended, so a boundary that passes at 02:00
+with the lid shut is not claimed at 02:00. It is claimed on wake.
+
+Observed on the author's own machine: a boundary at 00:00 was claimed at 06:51,
+when the laptop came back. That is a real loss of nearly seven hours of window —
+and it is not fixable from user space, because no process exists to send the
+request.
+
+What the tool does guarantee is that waking up is handled sanely: it claims
+**once**, not once per boundary it slept through, and anchors the new window on
+the grid from the moment it actually sent something.
+
+If you want the countdown to survive the night, the machine has to stay awake.
 
 ## Three limits, three responses
 
