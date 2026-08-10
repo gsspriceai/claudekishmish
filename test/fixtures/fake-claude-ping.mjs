@@ -19,6 +19,11 @@ const failWith = process.env.FAKE_FAIL_TEXT;
 if (argsFile) {
   fs.writeFileSync(argsFile, JSON.stringify(process.argv.slice(2)), 'utf8');
 }
+// And where: a claim discovering a project would change the prompt and miss the
+// prompt cache entirely.
+if (process.env.FAKE_CWD_FILE) {
+  fs.writeFileSync(process.env.FAKE_CWD_FILE, process.cwd(), 'utf8');
+}
 
 if (failWith) {
   // Claude Code prints this to stdout, not stderr.

@@ -19,12 +19,22 @@ interface DaemonLock {
   startedAt: number;
 }
 
+/**
+ * How long a lock may name a live pid before we stop believing it.
+ *
+ * `pidAlive` alone is not enough: pids are recycled, so an unrelated process
+ * inheriting the number would lock every future daemon out for ever, with a
+ * message naming a process that has nothing to do with us.
+ */
+const DAEMON_LOCK_MAX_AGE_MS = 24 * 3600_000;
+
 /** Claim the single-daemon slot, or report who already holds it. */
 export function acquireDaemonSlot(): { ok: boolean; holder?: number } {
   fs.mkdirSync(ckmHome(), { recursive: true });
   try {
     const lock = JSON.parse(fs.readFileSync(daemonLockPath(), 'utf8')) as DaemonLock;
-    if (lock.pid !== process.pid && pidAlive(lock.pid)) {
+    const stale = Date.now() - (lock.startedAt ?? 0) > DAEMON_LOCK_MAX_AGE_MS;
+    if (lock.pid !== process.pid && pidAlive(lock.pid) && !stale) {
       return { ok: false, holder: lock.pid };
     }
   } catch {

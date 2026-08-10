@@ -49,6 +49,20 @@ describe('parseSessionReset', () => {
     expect(noon.getHours()).toBe(12);
   });
 
+  it('parses a 24-hour clock, for locales that print one', () => {
+    // Unparseable before: resetAt stayed null, pendingResume was never set, and
+    // in-place continuation silently never happened for that user.
+    const r = parseSessionReset('resets 23:30', at(2026, 8, 10, 14, 0));
+    expect(r).not.toBeNull();
+    expect(r!.getHours()).toBe(23);
+    expect(r!.getMinutes()).toBe(30);
+  });
+
+  it('does not mistake a 12-hour string for a 24-hour one', () => {
+    const r = parseSessionReset('resets 11:30pm', at(2026, 8, 10, 14, 0))!;
+    expect(r.getHours()).toBe(23);
+  });
+
   it('returns null rather than guessing when there is no reset', () => {
     expect(parseSessionReset('You have reached your Fable 5 limit.', new Date())).toBeNull();
     expect(parseSessionReset('resets soon', new Date())).toBeNull();

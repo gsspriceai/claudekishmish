@@ -231,7 +231,7 @@ land in the degraded mode.
 ```bash
 npm install
 npm run build
-npm test          # 179 tests
+npm test          # 257 tests
 ```
 
 Correctness lives in pure functions (`window/ledger.ts`, `window/claimer.ts`),
@@ -241,7 +241,9 @@ loop runs in seconds with no account and no network.
 
 The suite is mutation-checked: each fixed defect is reintroduced and the test
 written for it must go red. A test that still passes with the bug back in is not
-a test.
+a test. Thirty-one mutations are checked this way, and several were added
+because an audit proved the original tests could not see them — most often
+because a guard had unit tests and its **call site** had none.
 
 ## Licence
 

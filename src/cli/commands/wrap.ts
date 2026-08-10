@@ -136,6 +136,7 @@ export async function runWrap(args: string[]): Promise<number> {
     );
   }
 
+  let lastDeclineReason: string | null = null;
   const resume = async (id: string): Promise<boolean> => {
     // State can change between scheduling a resume and performing it.
     if (!stillEligible(id, loadConfig())) {
@@ -143,7 +144,17 @@ export async function runWrap(args: string[]): Promise<number> {
       return false;
     }
     const outcome = await injectContinuation(pty, loadConfig().continuationText);
-    if (!outcome.ok) logError('resume.inject_failed', { reason: outcome.reason });
+    if (!outcome.ok) {
+      // A refusal is usually the guard doing its job — an unsent draft sitting
+      // in the box. Logged once per distinct reason, at info: an all-night draft
+      // was producing an error line every poll, thousands of them by morning.
+      if (outcome.reason !== lastDeclineReason) {
+        lastDeclineReason = outcome.reason;
+        logInfo('resume.declined', { sessionId: id, reason: outcome.reason });
+      }
+    } else {
+      lastDeclineReason = null;
+    }
     return outcome.ok;
   };
 
@@ -156,7 +167,7 @@ export async function runWrap(args: string[]): Promise<number> {
     // Publish draft state so `ckm status` can show it; the guard that matters
     // is re-checked inside injectContinuation at the moment of writing.
     void reportDraftInput(id, pty.hasDraftInput())
-      .catch(() => undefined)
+      .catch((err: Error) => logWarn('draft.report_failed', { message: err.message }))
       // Re-read config every tick so `ckm config set` reaches a running wrapper.
       .then(() => tick({ actor: { id: ACTOR_ID, ownSessionId: id }, resume, config: loadConfig() }))
       .catch((err: Error) => logError('tick.failed', { message: err.message }))

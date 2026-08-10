@@ -36,7 +36,7 @@ function parseClock(hourRaw: string, minuteRaw: string | undefined, meridiem: st
  */
 export function parseSessionReset(text: string, now: Date): Date | null {
   const m = /resets\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)/i.exec(text);
-  if (!m) return null;
+  if (!m) return parse24HourReset(text, now);
 
   const minutes = parseClock(m[1]!, m[2], m[3]!);
   const reset = new Date(now);
@@ -44,6 +44,23 @@ export function parseSessionReset(text: string, now: Date): Date | null {
   if (reset.getTime() <= now.getTime()) {
     reset.setDate(reset.getDate() + 1);
   }
+  return reset;
+}
+
+/**
+ * A 24-hour clock, for locales where Claude Code prints `resets 23:30`.
+ *
+ * Without this the string is unparseable, `resetAt` stays null, `pendingResume`
+ * is never set, and in-place continuation silently never happens for that user
+ * — with nothing said about why.
+ */
+function parse24HourReset(text: string, now: Date): Date | null {
+  const m = /resets\s+([01]?\d|2[0-3]):([0-5]\d)(?!\s*(am|pm))/i.exec(text);
+  if (!m) return null;
+
+  const reset = new Date(now);
+  reset.setHours(Number(m[1]!), Number(m[2]!), 0, 0);
+  if (reset.getTime() <= now.getTime()) reset.setDate(reset.getDate() + 1);
   return reset;
 }
 

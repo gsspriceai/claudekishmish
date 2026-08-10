@@ -92,9 +92,13 @@ async function acquireLock(): Promise<HeldLock> {
 async function releaseLock(held: HeldLock): Promise<void> {
   clearInterval(held.heartbeat);
   try {
+    // Only if it is still ours. After a stale reclaim the lock belongs to
+    // someone else, and deleting theirs would hand the file to a third process.
+    const owner = await fsp.readFile(stateLockPath(), 'utf8');
+    if (owner.trim() !== String(process.pid)) return;
     await fsp.unlink(stateLockPath());
   } catch {
-    /* already gone */
+    /* already gone, or not readable — leave it for the staleness sweep */
   }
 }
 
@@ -173,6 +177,13 @@ export async function updateState<T>(
   try {
     const current = readState();
     const { next, result } = mutate(current);
+
+    // Most ticks change nothing. Writing anyway meant a lock, a temp file and a
+    // rename every ten seconds per process, all day, for an unchanged 1 KB file.
+    const before = JSON.stringify({ ...current, updatedAt: 0 });
+    const after = JSON.stringify({ ...next, updatedAt: 0 });
+    if (before === after) return result;
+
     next.updatedAt = Date.now();
     await writeStateUnlocked(next);
     return result;
