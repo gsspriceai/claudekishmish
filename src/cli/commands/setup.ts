@@ -46,6 +46,15 @@ export function runSetup(opts: { noClaim?: boolean } = {}): number {
   const service = writeServiceUnit();
   if (service.unitPath) out.push(`  Wrote service unit  ${service.unitPath}`);
 
+  // The autostart entry lives at a fixed per-user OS location, so a second setup
+  // run with a different CKM_HOME silently repoints the first one. Say so.
+  if (process.env.CKM_HOME) {
+    out.push('');
+    out.push(`  Note: CKM_HOME is set to ${process.env.CKM_HOME}.`);
+    out.push('        The autostart entry is per-user and has been pointed at it,');
+    out.push('        replacing any previous one.');
+  }
+
   if (opts.noClaim) {
     saveConfig({ ...loadConfig(), idleClaim: false });
   }
@@ -122,7 +131,11 @@ export function runUninstall(): number {
   }
   out.push('');
   out.push('  Your state and logs are untouched. Delete them with:');
-  out.push(`      rm -rf ${dirOf(dir)}`);
+  out.push(
+    process.platform === 'win32'
+      ? `      Remove-Item -Recurse -Force "${dirOf(dir)}"`
+      : `      rm -rf ${dirOf(dir)}`,
+  );
   out.push('');
 
   logInfo('uninstall.completed', { removed: removed.length, unit });

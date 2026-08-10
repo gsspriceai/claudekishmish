@@ -6,10 +6,12 @@
  *
  * Three things this has to get right, all learned from measurement:
  *
- *   1. **Windows argument fidelity.** A `.cmd` relay of `%*` re-expands `%`, so
- *      `-p "fix the 50% failure rate"` arrives truncated and later flags are
- *      silently dropped. The batch shim therefore forwards the raw command tail
- *      rather than re-expanding it.
+ *   1. **Windows argument fidelity.** Measured, not assumed: `%*` is innocent,
+ *      but `call` performs a *second* percent and caret expansion pass. With
+ *      `call ckm wrap -- %*`, typing `-p "fix the 50% failure rate"` delivered
+ *      `-p "fix the 50 failure rate"` and dropped the flags after it. So the
+ *      batch shim invokes `node` and the CLI script directly — no `call`, and no
+ *      second batch file in the chain to need one.
  *   2. **Git Bash.** bash does not append `.cmd` when resolving a bare name, so
  *      a Windows-only `.cmd`/`.ps1` pair is invisible there — the shim looks
  *      installed and does nothing. An extension-less `sh` script is installed on
@@ -23,6 +25,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import { shimDir } from '../claude/locate.js';
+import { cliEntryPath } from './service.js';
 
 export interface ShimPlan {
   dir: string;
@@ -40,71 +43,95 @@ export interface ShimPlan {
  * `command -v ckm` keeps a removed package from bricking `claude`: without it,
  * uninstalling claudekishmish leaves a shim that resolves to nothing.
  */
+const SH_MARKER = 'claudekishmish shim';
+
 const SH_SHIM = `#!/bin/sh
-# claudekishmish shim — supervises every interactive Claude Code session.
+# ${SH_MARKER} — supervises every interactive Claude Code session.
 # Remove this file (or drop this directory from PATH) to disable.
 if command -v ckm >/dev/null 2>&1; then
   exec ckm wrap -- "$@"
 fi
 # claudekishmish is not installed any more; fall through to the real claude.
-for d in $(printf '%s' "$PATH" | tr ':' ' '); do
-  case "$d" in
-    */claudekishmish/shim|*/.claudekishmish/shim) continue ;;
-  esac
-  if [ -x "$d/claude" ]; then
-    exec "$d/claude" "$@"
+# IFS, not word splitting on spaces: a PATH entry like /c/Program Files/nodejs
+# would otherwise be torn into two directories that do not exist.
+OLD_IFS="$IFS"
+IFS=:
+for d in $PATH; do
+  IFS="$OLD_IFS"
+  [ -x "$d/claude" ] || { IFS=:; continue; }
+  # Never exec another copy of ourselves, whatever the directory is called.
+  if head -n 3 "$d/claude" 2>/dev/null | grep -q '${SH_MARKER}'; then
+    IFS=:
+    continue
   fi
+  exec "$d/claude" "$@"
 done
+IFS="$OLD_IFS"
 echo "claude: not found (claudekishmish shim is stale — delete $0)" >&2
 exit 127
 `;
 
-/**
- * Windows batch shim.
- *
- * `%*` is deliberately avoided. `setlocal DisableDelayedExpansion` stops `!`
- * from being eaten, and the arguments are forwarded through `%1 %2 …` shifting
- * rather than a single re-expanded blob.
- */
-const CMD_SHIM = `@echo off
-setlocal DisableDelayedExpansion
-REM claudekishmish shim - supervises every interactive Claude Code session.
-where /q ckm.cmd 2>nul || where /q ckm 2>nul
-if errorlevel 1 goto :passthrough
-call ckm wrap -- %*
-exit /b %ERRORLEVEL%
-:passthrough
-REM claudekishmish is gone; hand off to the real claude so nothing is bricked.
-for %%I in (claude.exe) do if not "%%~$PATH:I"=="" (
-  "%%~$PATH:I" %*
-  exit /b %ERRORLEVEL%
-)
-echo claude: not found ^(claudekishmish shim is stale^) 1>&2
-exit /b 127
-`;
-
-const PS1_SHIM = `# claudekishmish shim - supervises every interactive Claude Code session.
-if (Get-Command ckm -ErrorAction SilentlyContinue) {
-  ckm wrap -- @args
-  exit $LASTEXITCODE
+function cmdShim(node: string, cli: string): string {
+  // `call` is deliberately absent: it re-expands % and ^ in the forwarded
+  // arguments, silently truncating prompts. Invoking node directly avoids
+  // needing it at all, because there is no second batch file in the chain.
+  return [
+    '@echo off',
+    'setlocal DisableDelayedExpansion',
+    'REM claudekishmish shim - supervises every interactive Claude Code session.',
+    `if exist "${node}" if exist "${cli}" (`,
+    `  "${node}" "${cli}" wrap -- %*`,
+    '  exit /b %ERRORLEVEL%',
+    ')',
+    'REM claudekishmish is gone; hand off to the real claude so nothing is bricked.',
+    'for %%I in (claude.exe) do if not "%%~$PATH:I"=="" (',
+    '  "%%~$PATH:I" %*',
+    '  exit /b %ERRORLEVEL%',
+    ')',
+    'echo claude: not found ^(claudekishmish shim is stale^) 1>&2',
+    'exit /b 127',
+    '',
+  ].join('\r\n');
 }
-# claudekishmish is gone; fall through to the real claude.
-$real = Get-Command claude.exe -ErrorAction SilentlyContinue | Select-Object -First 1
-if ($real) { & $real.Source @args; exit $LASTEXITCODE }
-Write-Error 'claude: not found (claudekishmish shim is stale)'
-exit 127
-`;
+
+function ps1Shim(node: string, cli: string): string {
+  // PowerShell removes a bare `--` when building native argv, so
+  // `ckm wrap -- @args` arrived as `ckm wrap @args`: `claude --version` and
+  // `--help` were then answered by ckm itself, and a `--` the user typed was
+  // swallowed. The CLI accepts the passthrough without a separator, and node is
+  // invoked directly so nothing else can re-parse the arguments.
+  return [
+    '# claudekishmish shim - supervises every interactive Claude Code session.',
+    `$node = '${node}'`,
+    `$cli  = '${cli}'`,
+    'if ((Test-Path $node) -and (Test-Path $cli)) {',
+    '  & $node $cli wrap @args',
+    '  exit $LASTEXITCODE',
+    '}',
+    '# claudekishmish is gone; fall through to the real claude.',
+    '$real = Get-Command claude.exe -ErrorAction SilentlyContinue | Select-Object -First 1',
+    'if ($real) { & $real.Source @args; exit $LASTEXITCODE }',
+    "Write-Error 'claude: not found (claudekishmish shim is stale)'",
+    'exit 127',
+    '',
+  ].join('\n');
+}
 
 /** What installing the shim would do, without doing it. */
 export function planShim(): ShimPlan {
   const dir = shimDir();
+  // Absolute, resolved once at install time. The Windows shims invoke node and
+  // the CLI script directly rather than going through `ckm.cmd`, because a
+  // second batch file in the chain needs `call`, and `call` mangles arguments.
+  const node = process.execPath;
+  const cli = cliEntryPath();
 
   if (process.platform === 'win32') {
     return {
       dir,
       files: [
-        { path: path.join(dir, 'claude.cmd'), contents: CMD_SHIM },
-        { path: path.join(dir, 'claude.ps1'), contents: PS1_SHIM },
+        { path: path.join(dir, 'claude.cmd'), contents: cmdShim(node, cli) },
+        { path: path.join(dir, 'claude.ps1'), contents: ps1Shim(node, cli) },
         // Git Bash / MSYS resolve a bare `claude`, never `claude.cmd`.
         { path: path.join(dir, 'claude'), contents: SH_SHIM, mode: 0o755 },
       ],

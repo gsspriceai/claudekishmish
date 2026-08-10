@@ -188,8 +188,18 @@ export async function spawnPty(
     isRaw?: boolean;
     setRawMode?: (raw: boolean) => void;
   } = process.stdin,
+  /**
+   * Allocate a pseudo-terminal at all.
+   *
+   * A PTY makes the child believe it is on a terminal, which is right for an
+   * interactive session and wrong for `claude -p "..." > file`: that pipeline
+   * would receive screen-clearing and cursor sequences instead of plain text.
+   * When false, stdio is inherited and the child sees exactly what it would
+   * have seen unsupervised.
+   */
+  usePty = true,
 ): Promise<PtySession> {
-  const pty = await loadNodePty();
+  const pty = usePty ? await loadNodePty() : null;
   const env = childEnv(extraEnv);
 
   if (pty) {

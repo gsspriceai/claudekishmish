@@ -40,6 +40,26 @@ function version(): string {
   }
 }
 
+/**
+ * `wrap` is handled before commander ever sees the arguments.
+ *
+ * PowerShell strips a bare `--` when building native argv, so `ckm wrap -- @args`
+ * arrived as `ckm wrap @args` and commander then answered `claude --version` and
+ * `claude --help` itself — with ckm's version and ckm's help — while a `--` the
+ * user typed was swallowed. Nothing after `wrap` may be parsed by us: it all
+ * belongs to Claude Code.
+ */
+if (process.argv[2] === 'wrap') {
+  const rest = process.argv.slice(3);
+  // A leading `--` is the separator, not an argument, when it is present at all.
+  const passthrough = rest[0] === '--' ? rest.slice(1) : rest;
+  const code = await runWrap(passthrough);
+  // node-pty leaves live handles behind, so a natural exit never arrives and the
+  // user's terminal would hang after quitting Claude Code. Leave deliberately,
+  // with the child's own exit code.
+  process.exit(code);
+}
+
 const program = new Command();
 
 program
@@ -176,18 +196,15 @@ program
     process.exitCode = runShimInfo();
   });
 
+// Listed so it appears in `ckm --help`; never reached, because `wrap` is
+// intercepted above before commander parses anything.
 program
   .command('wrap')
   .description('internal: run Claude Code under supervision (this is what the shim calls)')
   .allowUnknownOption(true)
   .argument('[args...]', 'arguments passed through to claude')
-  .action(async (args: string[]) => {
-    const code = await runWrap(args ?? []);
-    // node-pty leaves live handles behind, so a natural exit never arrives and
-    // the user's terminal would hang after quitting Claude Code. Leave
-    // deliberately, with the child's own exit code.
-    process.stdout.write('');
-    process.exit(code);
+  .action(() => {
+    process.exitCode = 0;
   });
 
 program

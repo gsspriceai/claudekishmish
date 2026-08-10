@@ -5,3 +5,6 @@ dist/
 coverage/
 .vitest/
 *.tsbuildinfo
+
+# npm pack output
+*.tgz

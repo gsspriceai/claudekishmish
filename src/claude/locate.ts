@@ -95,6 +95,23 @@ export function shimDir(): string {
   return path.join(ckmHome(), 'shim');
 }
 
+/**
+ * Is this file one of our own shims?
+ *
+ * Comparing against `shimDir()` alone is not enough: `CKM_HOME` can differ
+ * between the run that installed the shim and the run resolving PATH, and then
+ * the shim resolves to itself. Every shim carries this marker in its first few
+ * lines, so recognising one does not depend on where it lives.
+ */
+export function isOurShim(file: string): boolean {
+  try {
+    const head = fs.readFileSync(file, 'utf8').slice(0, 400);
+    return head.includes('claudekishmish shim');
+  } catch {
+    return false;
+  }
+}
+
 /** Conventional install locations, for when PATH is minimal (launchd, systemd). */
 function wellKnownPaths(): string[] {
   const home = os.homedir();
@@ -133,8 +150,9 @@ export function locateClaude(env: NodeJS.ProcessEnv = process.env): string | nul
       const candidate = path.join(dir, name);
       if (!isExecutableFile(candidate)) continue;
       // Never hand back something inside our own shim directory, whatever the
-      // PATH entry looked like.
+      // PATH entry looked like — nor a shim living anywhere else.
       if (samePath(path.dirname(candidate), ourShim)) continue;
+      if (isOurShim(candidate)) continue;
       return resolveBatchToExe(candidate) ?? candidate;
     }
   }

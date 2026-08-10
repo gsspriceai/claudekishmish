@@ -5,6 +5,13 @@ on:
     branches: [main]
   pull_request:
 
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   test:
     name: ${{ matrix.os }} / node ${{ matrix.node }}
@@ -50,8 +57,14 @@ jobs:
       # node-pty is optional, and the build must not need it. This job exists
       # because the project once failed to compile at all without it (TS2307),
       # which made the whole degraded path unreachable.
-      - name: Install without optional dependencies
-        run: npm ci --omit=optional
+      #
+      # `npm ci --omit=optional` cannot be used: it also strips rollup's platform
+      # binary, an optional dependency of the vite/vitest chain, and nothing runs
+      # at all. Install normally and remove only the dependency under test.
+      - name: Install, then remove node-pty
+        run: |
+          npm ci
+          rm -rf node_modules/node-pty
 
       - name: Build
         run: npm run build

@@ -111,6 +111,10 @@ function startWrap(extraEnv: Record<string, string> = {}): ChildProcess {
       FAKE_MARKER: marker,
       CKM_INTERNAL: '',
       CKM_DEPTH: '',
+      // These tests drive `ckm wrap` over pipes. Without this it would correctly
+      // decide the run is non-interactive and skip the PTY — which is the right
+      // behaviour for `claude -p > file`, and the wrong one here.
+      CKM_FORCE_PTY: '1',
       ...extraEnv,
     },
   });

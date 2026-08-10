@@ -106,7 +106,7 @@ Description=claudekishmish usage-window claimer
 
 [Service]
 Type=simple
-Environment=CKM_HOME=${stateDir}
+Environment="CKM_HOME=${stateDir}"
 ExecStart=${node} ${script} daemon
 Restart=always
 RestartSec=30
@@ -116,7 +116,7 @@ WantedBy=default.target
 `,
       activate: ['systemctl', '--user', 'enable', '--now', 'claudekishmish.service'],
       notes:
-        'Run `loginctl enable-linger $USER` too, so it keeps running while you are logged out.',
+        'If systemd does not see it, run `systemctl --user daemon-reload` first. Run `loginctl enable-linger $USER` too, so it keeps running while you are logged out.',
     };
   }
 
@@ -139,9 +139,20 @@ WantedBy=default.target
         'REM claudekishmish background boundary claimer (per-user, no admin rights)\r\n' +
         `set "CKM_HOME=${stateDir}"\r\n` +
         `start "" /min "${node}" "${script}" daemon\r\n`,
-      activate: [`"${node}"`, `"${script}"`, 'daemon'],
+      // Valid PowerShell, which is the shell `ckm setup` names one line
+      // earlier. `"<path>" "<path>" daemon` is a parse error there, and running
+      // it in the foreground would occupy the terminal and die with it.
+      activate: [
+        'Start-Process',
+        '-WindowStyle',
+        'Hidden',
+        '-FilePath',
+        `"${node}"`,
+        '-ArgumentList',
+        `"${script}","daemon"`,
+      ],
       notes:
-        'Installed to your Startup folder, so it begins at every login. The command above starts it right now, in this session.',
+        'Installed to your Startup folder, so it begins at every login. The command above also starts it right now, detached from this terminal.',
     };
   }
 

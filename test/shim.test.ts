@@ -69,18 +69,47 @@ describe('installShim', () => {
     expect(raw).toContain('\r\n');
   });
 
-  it('every shim falls back to the real claude if ckm is gone', async () => {
+  it('every shim falls back to the real claude if the tool is gone', async () => {
     // Otherwise `npm uninstall -g claudekishmish` leaves a shim on PATH that
     // intercepts `claude` with nothing behind it.
     const { installShim } = await shell();
     const plan = installShim();
     for (const file of plan.files) {
       const body = fs.readFileSync(file.path, 'utf8');
-      expect(body.toLowerCase(), file.path).toMatch(/claude/);
-      expect(body, file.path).toMatch(/ckm/);
+      // Each one checks that what it is about to run still exists, and hands off
+      // to the real binary when it does not.
+      expect(body, file.path).toMatch(/claude/i);
+      expect(body, file.path).toMatch(/not found|Test-Path|if exist|command -v/);
     }
     const sh = fs.readFileSync(path.join(shimDirPath, 'claude'), 'utf8');
     expect(sh).toMatch(/command -v ckm/);
+  });
+
+  it('the Windows shims invoke node directly, never a second batch file', async () => {
+    // `call` re-expands % and ^ in the forwarded arguments, silently truncating
+    // prompts, and a batch file calling another batch file needs `call`.
+    if (process.platform !== 'win32') return;
+    const { installShim } = await shell();
+    installShim();
+
+    const cmd = fs.readFileSync(path.join(shimDirPath, 'claude.cmd'), 'utf8');
+    expect(cmd).not.toMatch(/call/i);
+    expect(cmd).toContain('node');
+
+    // PowerShell strips a bare `--`, so the shim must not depend on one.
+    const ps1 = fs.readFileSync(path.join(shimDirPath, 'claude.ps1'), 'utf8');
+    expect(ps1).toContain('wrap @args');
+    expect(ps1).not.toContain('wrap -- @args');
+  });
+
+  it('the sh shim survives a PATH entry containing spaces', async () => {
+    // `tr ':' ' '` tore `/c/Program Files/nodejs` into two directories that do
+    // not exist, so the uninstall fallback silently found nothing.
+    const { installShim } = await shell();
+    installShim();
+    const sh = fs.readFileSync(path.join(shimDirPath, 'claude'), 'utf8');
+    expect(sh).toContain('IFS=:');
+    expect(sh).not.toMatch(/tr ':' ' '/);
   });
 
   it('uninstall removes what install created', async () => {

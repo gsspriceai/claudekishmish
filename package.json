@@ -31,9 +31,10 @@
     "dev": "tsc -p tsconfig.json --watch",
     "test": "npm run build && vitest run",
     "test:unit": "vitest run",
-    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.test.json",
     "postinstall": "node scripts/postinstall.mjs",
     "verify:history": "node scripts/verify-against-real-history.mjs",
+    "mutation-check": "npm run build && node scripts/mutation-check.mjs",
     "prepublishOnly": "npm run typecheck && npm run build && vitest run"
   },
   "keywords": [
@@ -49,7 +50,7 @@
     "commander": "^12.1.0"
   },
   "optionalDependencies": {
-    "node-pty": "^1.0.0"
+    "node-pty": "1.1.0"
   },
   "devDependencies": {
     "@types/node": "^22.10.0",

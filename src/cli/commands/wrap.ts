@@ -89,13 +89,33 @@ export async function runWrap(args: string[]): Promise<number> {
   }
   if (depth > 0 || process.env.CKM_INTERNAL === '1') {
     // Already supervised (or an internal call): run Claude straight through.
-    const r = spawnClaudeSync(bin, args, { stdio: 'inherit' });
+    // The depth must still climb — inheriting it unchanged left a
+    // self-resolving shim looping for ever at depth 1 instead of hitting the
+    // guard above.
+    const r = spawnClaudeSync(bin, args, {
+      stdio: 'inherit',
+      env: { ...process.env, [SUPERVISION_DEPTH_VAR]: String(depth + 1) },
+    });
     return r.status ?? 0;
   }
 
-  const pty: PtySession = await spawnPty(bin, args, process.cwd(), {
-    [SUPERVISION_DEPTH_VAR]: String(depth + 1),
-  });
+  // A PTY makes the child believe it is on a terminal. That is right for an
+  // interactive session and wrong for `claude -p "..." > file`, which would
+  // otherwise receive screen-clearing and cursor sequences instead of text.
+  // `CKM_FORCE_PTY=1` overrides the detection. It exists for two real cases: a
+  // terminal that does not report itself as a TTY, and the integration tests,
+  // which drive `ckm wrap` over pipes and still need the PTY path.
+  const interactive =
+    process.env.CKM_FORCE_PTY === '1' ||
+    Boolean(process.stdout.isTTY && process.stdin.isTTY);
+  const pty: PtySession = await spawnPty(
+    bin,
+    args,
+    process.cwd(),
+    { [SUPERVISION_DEPTH_VAR]: String(depth + 1) },
+    process.stdin,
+    interactive,
+  );
 
   // Registered before anything else can await: a short-lived invocation exits
   // in milliseconds, and an exit delivered to nobody is a hung terminal.
@@ -104,7 +124,11 @@ export async function runWrap(args: string[]): Promise<number> {
     childExit = code;
   });
 
-  if (!pty.canInject) {
+  // Only worth saying to a person sitting at a terminal. Printed unconditionally
+  // it became two lines of stderr on every `claude --version`, every `mcp list`
+  // and every scripted `claude -p` — for ever, for a Linux user with no
+  // node-pty prebuild.
+  if (!pty.canInject && interactive) {
     process.stderr.write(
       'claudekishmish: node-pty is unavailable, so this session cannot be continued in place.\n' +
         'Supervision and boundary claiming still work. Run `ckm doctor` for details.\n',
@@ -128,7 +152,10 @@ export async function runWrap(args: string[]): Promise<number> {
       resumeCount: 0,
       limit: null,
     });
-  } else {
+  } else if (childExit === null && interactive) {
+    // A one-shot command was never going to be supervised, and a child that has
+    // already exited is not news. Saying so on every non-interactive run is
+    // noise the user cannot act on.
     logWarn('wrap.no_session_descriptor', { pid: pty.pid });
     process.stderr.write(
       'claudekishmish: this session was not registered, so it will not be auto-continued.\n' +
