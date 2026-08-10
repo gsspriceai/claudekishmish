@@ -1,4 +1,27 @@
-# claudekishmish — Design
+# claudekishmish — original design record
+
+**Written 2026-08-09, before implementation. Kept as a record of how the window
+model was derived, not as documentation of current behaviour.**
+
+Several decisions here were later reversed by measurement, and the code is the
+authority — see `README.md`. The notable reversals:
+
+- **`--bare` (§4.1)** — it cannot authenticate a subscription account ("OAuth and
+  keychain are never read", in the flag's own help), so every claim failed with
+  `Not logged in`. Replaced with flags that trim context without touching auth.
+- **"a claim is a few hundred tokens" (§4.1)** — measured at ~22k cached-read
+  tokens. Trying to shrink it further costs *more*, by missing the prompt cache.
+- **The claim rule (§4)** — a boundary is now *reserved* by an owner and only
+  becomes a claim once a request actually lands. Marking it claimed at decision
+  time let an actor that could not act consume it, silently.
+- **Windows autostart** — `schtasks /SC ONLOGON` needs elevation; the Startup
+  folder does not.
+
+What has held up, and is worth reading for: the derivation of the window model
+in §2 from 90 real `rate_limit` records, and the reasoning in §2.3 about why
+continuing a session in place requires owning its PTY.
+
+---
 
 **Date:** 2026-08-09
 **Status:** Approved for implementation
@@ -84,8 +107,8 @@ platforms:
 
 ```json
 { "pid": 23120, "sessionId": "98399394-864e-4a9a-82bb-f81f42df5e16",
-  "cwd": "E:\\ZLASH BACKEND", "kind": "interactive", "entrypoint": "cli",
-  "name": "zlash-backend-26", "status": "busy", "procStart": "134306689508165532" }
+  "cwd": "C:\\work\\my-project", "kind": "interactive", "entrypoint": "cli",
+  "name": "my-project-a1", "status": "busy", "procStart": "134306689508165532" }
 ```
 
 A session is *open in a terminal* when `kind === "interactive"`, its PID is alive,
