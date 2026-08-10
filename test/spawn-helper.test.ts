@@ -60,24 +60,52 @@ function fakeOps(startMode: number): ModeOps & { mode: number; chmods: number } 
   } as ModeOps & { mode: number; chmods: number };
 }
 
+/** Put a helper at an arbitrary layout under the fake package. */
+function place(...segments: string[]): string {
+  const file = path.join(root, ...segments, 'spawn-helper');
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.writeFileSync(file, '', 'utf8');
+  return file;
+}
+
 describe('findSpawnHelper', () => {
-  it('finds the helper by walking up from the entry point', () => {
-    expect(findSpawnHelper(entry)).toBe(helper);
+  it('finds a source build under build/Release', () => {
+    expect(findSpawnHelper(entry, 'darwin', 'arm64')).toBe(helper);
+  });
+
+  it('finds a PREBUILT install under prebuilds/<platform>-<arch>', () => {
+    // This is the layout macOS actually gets from npm, and searching only
+    // build/Release made the repair report "nothing to repair" on the one
+    // platform it exists for — while the pty tests skipped themselves green.
+    fs.rmSync(path.join(root, 'build'), { recursive: true, force: true });
+    const prebuilt = place('prebuilds', 'darwin-arm64');
+    expect(findSpawnHelper(entry, 'darwin', 'arm64')).toBe(prebuilt);
+  });
+
+  it('does not pick up a prebuild for a different architecture', () => {
+    fs.rmSync(path.join(root, 'build'), { recursive: true, force: true });
+    place('prebuilds', 'darwin-x64');
+    expect(findSpawnHelper(entry, 'darwin', 'arm64')).toBeNull();
+  });
+
+  it('prefers a local build over a prebuild, as node-pty does', () => {
+    // node-pty loads its binding from the first directory that works, and the
+    // helper must come from the same place as the binding beside it.
+    place('prebuilds', 'darwin-arm64');
+    expect(findSpawnHelper(entry, 'darwin', 'arm64')).toBe(helper);
+  });
+
+  it('finds a bundled layout, where the dirs sit beside lib/', () => {
+    fs.rmSync(path.join(root, 'build'), { recursive: true, force: true });
+    const bundled = place('lib', 'build', 'Release');
+    expect(findSpawnHelper(entry, 'darwin', 'arm64')).toBe(bundled);
   });
 
   it('is null when there is no helper to repair', () => {
-    // A source build can place it elsewhere. Reporting "repaired" here would be
-    // a lie about the one thing the caller needs to know.
+    // Reporting "repaired" here would be a lie about the one thing the caller
+    // needs to know.
     fs.rmSync(path.join(root, 'build'), { recursive: true, force: true });
-    expect(findSpawnHelper(entry)).toBeNull();
-  });
-
-  it('does not climb indefinitely towards the filesystem root', () => {
-    // Left unbounded this would walk out of the package and could "find" an
-    // unrelated build directory belonging to something else entirely.
-    const deep = path.join(root, 'a', 'b', 'c', 'd', 'e', 'f', 'g');
-    fs.mkdirSync(deep, { recursive: true });
-    expect(findSpawnHelper(path.join(deep, 'index.js'))).toBeNull();
+    expect(findSpawnHelper(entry, 'darwin', 'arm64')).toBeNull();
   });
 });
 
@@ -109,6 +137,19 @@ describe('repairSpawnHelper', () => {
       expect(repairSpawnHelper(entry, platform, ops)).toBe('not-darwin');
       expect(ops.chmods).toBe(0);
     }
+  });
+
+  it('repairs a PREBUILT macOS install, from a machine that is not macOS', () => {
+    // Everything above uses build/Release, which is spelled the same on every
+    // platform — so it could not see the repair looking under
+    // `prebuilds/win32-x64` while claiming to act as darwin. That is the shape
+    // the real bug had: "not-found", reported as nothing being wrong.
+    fs.rmSync(path.join(root, 'build'), { recursive: true, force: true });
+    place('prebuilds', `darwin-${process.arch}`);
+
+    const ops = fakeOps(0o644);
+    expect(repairSpawnHelper(entry, 'darwin', ops)).toBe('repaired');
+    expect(ops.mode & 0o111).toBe(0o111);
   });
 
   it('reports, rather than throws, when there is no helper', () => {

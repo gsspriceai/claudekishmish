@@ -251,8 +251,8 @@ const MUTATIONS = [
     file: 'src/pty/spawn-helper.ts',
     find: `  if (platform !== 'darwin') return 'not-darwin';
 
-  const helper = findSpawnHelper(entry);`,
-    replace: `  const helper = findSpawnHelper(entry);`,
+  // The platform`,
+    replace: `  // The platform`,
     expect: 'test/spawn-helper.test.ts',
   },
   {
@@ -263,10 +263,17 @@ const MUTATIONS = [
     expect: 'test/spawn-helper.test.ts',
   },
   {
-    name: 'the helper search climbs out of the package',
+    name: 'the helper search misses prebuilt installs (the macOS layout)',
     file: 'src/pty/spawn-helper.ts',
-    find: `  for (let i = 0; i < 5; i++) {`,
-    replace: `  for (let i = 0; i < 500; i++) {`,
+    find: "  const dirs = ['build/Release', 'build/Debug', `prebuilds/${platform}-${arch}`];",
+    replace: "  const dirs = ['build/Release'];",
+    expect: 'test/spawn-helper.test.ts',
+  },
+  {
+    name: 'the repair looks for darwin paths using the host platform',
+    file: 'src/pty/spawn-helper.ts',
+    find: '  const helper = findSpawnHelper(entry, platform);',
+    replace: '  const helper = findSpawnHelper(entry);',
     expect: 'test/spawn-helper.test.ts',
   },
   {

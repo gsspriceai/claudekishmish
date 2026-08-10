@@ -30,19 +30,34 @@ import { logInfo, logWarn } from '../logger/index.js';
 const EXEC_BITS = 0o111;
 
 /**
- * Walk up from node-pty's entry point to the directory holding its build
- * output. Resolved rather than assumed: the entry is `lib/index.js` today, but
- * the layout is the dependency's to change, and a hard-coded `'..'` would fail
- * silently — reporting a repaired helper that was never touched.
+ * Find the helper the way node-pty itself finds it.
+ *
+ * `lib/utils.js` tries `build/Release`, `build/Debug` and
+ * `prebuilds/<platform>-<arch>`, each relative to the package root and then to
+ * `lib/`, and takes the first that loads. The helper sits beside the `.node`
+ * binding in whichever of those won.
+ *
+ * The first version of this searched only `build/Release`, which is where a
+ * *source* build puts it. macOS installs from the prebuild, so the repair
+ * reported "nothing to repair" on the single platform it exists for — and the
+ * PTY tests, which skip when no pty can be allocated, skipped themselves into
+ * a green run. Mirroring node-pty's own list is what keeps the two from
+ * drifting apart again.
  */
-export function findSpawnHelper(entry: string): string | null {
-  let dir = path.dirname(path.resolve(entry));
-  for (let i = 0; i < 5; i++) {
-    const candidate = path.join(dir, 'build', 'Release', 'spawn-helper');
-    if (fs.existsSync(candidate)) return candidate;
-    const parent = path.dirname(dir);
-    if (parent === dir) break;
-    dir = parent;
+export function findSpawnHelper(
+  entry: string,
+  platform: string = process.platform,
+  arch: string = process.arch,
+): string | null {
+  const lib = path.dirname(path.resolve(entry));
+  const dirs = ['build/Release', 'build/Debug', `prebuilds/${platform}-${arch}`];
+
+  for (const dir of dirs) {
+    // '..' for an unbundled install, '.' for a bundled one — node-pty's order.
+    for (const relative of ['..', '.']) {
+      const candidate = path.join(lib, relative, dir, 'spawn-helper');
+      if (fs.existsSync(candidate)) return candidate;
+    }
   }
   return null;
 }
@@ -77,7 +92,10 @@ export function repairSpawnHelper(
 ): RepairOutcome {
   if (platform !== 'darwin') return 'not-darwin';
 
-  const helper = findSpawnHelper(entry);
+  // The platform is passed through: a repair asked to act as darwin must look
+  // where darwin's node-pty puts things, or it reports "not-found" and the
+  // caller believes there was nothing wrong.
+  const helper = findSpawnHelper(entry, platform);
   if (helper === null) {
     // Not every node-pty build has one — a source build may place it elsewhere.
     // Nothing to repair, and nothing worth warning about.
