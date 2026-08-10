@@ -70,6 +70,15 @@ export async function injectContinuation(
     return { ok: false, reason: 'pty write failed' };
   }
   await new Promise((r) => setTimeout(r, settleMs));
+
+  // Checked again: the settle pause is a window in which the user can start
+  // typing, and pressing Enter then would submit their text along with ours.
+  // `write` above resets the tracker, so anything dirty now is theirs.
+  if (session.hasDraftInput()) {
+    logWarn('inject.aborted_mid_write', { pid: session.pid });
+    return { ok: false, reason: 'the user started typing while we were writing' };
+  }
+
   if (!session.write(ENTER)) {
     return { ok: false, reason: 'pty write failed on enter' };
   }

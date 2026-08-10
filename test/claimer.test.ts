@@ -186,6 +186,39 @@ describe('decideClaim', () => {
   });
 
   /**
+   * Continuing and claiming are separate questions. A session whose stated reset
+   * has passed can be continued now — the window is already running and
+   * continuing it spends no boundary. Gating that on `isBoundaryDue` stranded
+   * the second of two interrupted sessions for a further five hours, despite it
+   * being eligible the whole time.
+   */
+  it('continues an eligible session inside a window that is already running', () => {
+    const state = stateWithBoundaryDue([session()]);
+    // The boundary was already claimed, so none is due — but this session's own
+    // reset passed long ago.
+    state.ledger.lastClaimedBoundary = BOUNDARY;
+    state.ledger.currentEnd = BOUNDARY;
+
+    const d = decideClaim(state, withIdle, NOW, WRAPPER);
+    expect(d.action).toBe('resume');
+    if (d.action === 'resume') expect(d.claimsBoundary).toBe(false);
+  });
+
+  it('marks the resume as claiming when a boundary really is due', () => {
+    const d = decideClaim(stateWithBoundaryDue([session()]), withIdle, NOW, WRAPPER);
+    expect(d.action).toBe('resume');
+    if (d.action === 'resume') expect(d.claimsBoundary).toBe(true);
+  });
+
+  it('still waits out the buffer after the stated reset', () => {
+    // The buffer exists so we are never a second early; that applies to a
+    // server-stated reset exactly as it does to a computed boundary.
+    const justAfterReset = BOUNDARY + 5_000;
+    expect(sessionResumable(session(), config, justAfterReset).ok).toBe(false);
+    expect(sessionResumable(session(), config, BOUNDARY + config.boundaryBufferMs).ok).toBe(true);
+  });
+
+  /**
    * A deliberate decision, recorded here so it is not quietly reversed.
    *
    * Claiming through a terminal that is already open would create nothing and

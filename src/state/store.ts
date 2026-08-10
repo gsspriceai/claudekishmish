@@ -22,6 +22,7 @@ import fs from 'node:fs';
 import fsp from 'node:fs/promises';
 import { statePath, stateLockPath, ckmHome } from '../platform/paths.js';
 import { emptyState, type State } from './schema.js';
+import { logWarn } from '../logger/index.js';
 
 const LOCK_STALE_MS = 15_000;
 const LOCK_HEARTBEAT_MS = 3_000;
@@ -99,20 +100,57 @@ async function releaseLock(held: HeldLock): Promise<void> {
 
 function parseState(raw: string): State {
   const parsed = JSON.parse(raw) as State;
-  if (!parsed || parsed.version !== 1) return emptyState(Date.now());
+  if (!parsed || parsed.version !== 1) throw new Error('unrecognised state version');
   // Tolerate files written by an older build that lacked a field.
   const base = emptyState(Date.now());
   return { ...base, ...parsed, ledger: { ...base.ledger, ...parsed.ledger } };
 }
 
-/** Read state without locking. Fine for display; never for read-modify-write. */
+/**
+ * Read state without locking. Fine for display; never for read-modify-write.
+ *
+ * The three cases are deliberately not the same:
+ *
+ *   - **no file** is normal — there is simply no history yet;
+ *   - **unreadable JSON** is recoverable, but it must be visible: the file is
+ *     set aside as `state.json.corrupt` and a warning logged, because silently
+ *     starting from nothing discards an active halt and the weekly claim
+ *     count, and the very next tick then spends a request the halt existed to
+ *     prevent;
+ *   - **any other I/O error** (EPERM or EBUSY, routine on Windows during the
+ *     concurrent rename below, or under antivirus) is *not* evidence of an
+ *     empty state and must not be treated as one. It throws, so the caller
+ *     retries on the next poll instead of overwriting everything with defaults.
+ */
 export function readState(): State {
+  let raw: string;
   try {
-    return parseState(fs.readFileSync(statePath(), 'utf8'));
+    raw = fs.readFileSync(statePath(), 'utf8');
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return emptyState(Date.now());
+    throw err;
+  }
+
+  try {
+    return parseState(raw);
   } catch {
-    // Missing or corrupt state is not an error: we simply have no history yet.
+    quarantineCorruptState();
     return emptyState(Date.now());
   }
+}
+
+/** Move an unparsable state file aside so the loss is recoverable and obvious. */
+function quarantineCorruptState(): void {
+  const bad = `${statePath()}.corrupt`;
+  try {
+    fs.renameSync(statePath(), bad);
+  } catch {
+    /* best effort */
+  }
+  logWarn('state.corrupt', {
+    movedTo: bad,
+    note: 'starting from empty state; any halt and the weekly claim count were lost',
+  });
 }
 
 async function writeStateUnlocked(state: State): Promise<void> {

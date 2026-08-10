@@ -44,6 +44,24 @@ describe('state store', () => {
     expect(readState().sessions).toEqual({});
   });
 
+  it('sets a corrupt file aside instead of silently discarding it', () => {
+    // Starting from empty throws away an active halt and the weekly claim
+    // count, and the next tick then spends a request the halt existed to
+    // prevent. That must at least be recoverable and visible.
+    fs.writeFileSync(path.join(home, 'state.json'), '{ truncated', 'utf8');
+    readState();
+    expect(fs.existsSync(path.join(home, 'state.json.corrupt'))).toBe(true);
+  });
+
+  it('throws on an I/O error rather than pretending the state is empty', () => {
+    // EPERM and EBUSY are routine on Windows during the concurrent rename, and
+    // under antivirus. Treating one as "no history" inside `updateState` would
+    // overwrite the ledger, every session, the weekly cap and an active halt
+    // with defaults.
+    fs.mkdirSync(path.join(home, 'state.json'));
+    expect(() => readState()).toThrow();
+  });
+
   it('backfills fields missing from an older state file', () => {
     fs.writeFileSync(
       path.join(home, 'state.json'),

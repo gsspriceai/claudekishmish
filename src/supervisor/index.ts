@@ -133,6 +133,35 @@ export function absorbLimit(state: State, sessionId: string | null, event: Limit
   return next;
 }
 
+/**
+ * A session the user rescued themselves is no longer waiting on us.
+ *
+ * Nothing used to clear `pendingResume` except our own successful continuation,
+ * so a session that came back to life any other way stayed flagged — and hours
+ * later `continue` landed in the middle of unrelated live work. Reachable
+ * whenever the first attempt was declined: a draft in the input box, a pause
+ * that was later lifted, or a machine asleep while the user typed.
+ *
+ * A user turn after the limit was recorded is proof the session is working
+ * again.
+ */
+export function absorbUserRecovery(state: State, sessionId: string, turns: number[]): State {
+  const session = state.sessions[sessionId];
+  if (!session?.pendingResume || !session.limit) return state;
+
+  const recoveredAt = turns.find((t) => t > session.limit!.detectedAt);
+  if (recoveredAt === undefined) return state;
+
+  logInfo('resume.no_longer_needed', { sessionId, reason: 'the user carried on themselves' });
+  return {
+    ...state,
+    sessions: {
+      ...state.sessions,
+      [sessionId]: { ...session, pendingResume: false, updatedAt: Date.now() },
+    },
+  };
+}
+
 /** Keep the ledger current from ordinary conversation activity. */
 export function absorbTurns(state: State, turns: number[], now: number): State {
   const last = turns[turns.length - 1];
@@ -208,6 +237,7 @@ export async function tick(ctx: TickContext): Promise<ClaimDecision> {
     for (const obs of observations) {
       if (!next.sessions[obs.sessionId]) continue;
       next = absorbTurns(next, obs.turns, now);
+      next = absorbUserRecovery(next, obs.sessionId, obs.turns);
       if (obs.limit) {
         const existing = next.sessions[obs.sessionId]?.limit;
         if (!existing || existing.detectedAt !== obs.limit.detectedAt) {
@@ -218,8 +248,9 @@ export async function tick(ctx: TickContext): Promise<ClaimDecision> {
 
     const d = decideClaim(next, ctx.config, now, ctx.actor);
 
-    // Take an owned hold only for actions this process will actually attempt.
-    if (d.action === 'resume' || d.action === 'ping') {
+    // Take an owned hold only when this action will actually spend a boundary.
+    // A continuation inside a window that is already running spends nothing.
+    if (d.action === 'ping' || (d.action === 'resume' && d.claimsBoundary)) {
       next = { ...next, ledger: reserveBoundary(next.ledger, ctx.actor.id, now) };
     }
     return { next, result: d };
@@ -241,7 +272,9 @@ export async function tick(ctx: TickContext): Promise<ClaimDecision> {
     await updateState((state) => {
       const session = state.sessions[decision.sessionId];
       let ledger = state.ledger;
-      if (ok) {
+      if (ok && !decision.claimsBoundary) {
+        // Continued inside a live window: nothing to claim, nothing to release.
+      } else if (ok) {
         const commit = commitClaim(ledger, ctx.actor.id, Date.now());
         ledger = commit.ledger;
         if (!commit.committed) {

@@ -2,16 +2,18 @@ import { describe, expect, it, vi } from 'vitest';
 import { injectContinuation, isSafeContinuation } from '../src/pty/inject.js';
 import type { PtySession } from '../src/pty/host.js';
 
-function fakePty(opts: { canInject?: boolean; draft?: boolean } = {}): PtySession & {
-  written: string[];
-} {
+function fakePty(
+  opts: { canInject?: boolean; draft?: boolean; draftAfterWrite?: boolean } = {},
+): PtySession & { written: string[] } {
   const canInject = opts.canInject ?? true;
   const written: string[] = [];
   return {
     pid: 1,
     canInject,
     written,
-    hasDraftInput: () => opts.draft ?? false,
+    // `draftAfterWrite` models the user starting to type during the settle
+    // pause, between our text and our Enter.
+    hasDraftInput: () => (opts.draftAfterWrite ? written.length > 0 : (opts.draft ?? false)),
     write(data: string) {
       written.push(data);
       return canInject;
@@ -87,5 +89,18 @@ describe('injectContinuation', () => {
     await injectContinuation(pty, 'continue', 250);
     expect(spy).toHaveBeenCalled();
     spy.mockRestore();
+  });
+});
+
+describe('the settle pause is a race, and it is checked', () => {
+  it('does not press Enter if the user started typing while we were writing', async () => {
+    // Our text goes in, then a 250ms pause. Anything typed in that window would
+    // be submitted along with ours.
+    const pty = fakePty({ draftAfterWrite: true });
+    const result = await injectContinuation(pty, 'continue', 0);
+    expect(result.ok).toBe(false);
+    expect(result.reason).toMatch(/started typing/);
+    // The text was written, but Enter never was, so nothing was submitted.
+    expect(pty.written).toEqual(['continue']);
   });
 });

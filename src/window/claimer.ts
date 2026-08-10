@@ -24,7 +24,7 @@ import type { State, SupervisedSession } from '../state/schema.js';
 import { isBoundaryDue, nextBoundary, reservedByOther } from './ledger.js';
 
 export type ClaimDecision =
-  | { action: 'resume'; sessionId: string; reason: string }
+  | { action: 'resume'; sessionId: string; reason: string; claimsBoundary: boolean }
   | { action: 'ping'; reason: string }
   | { action: 'defer'; sessionId: string; reason: string }
   | { action: 'none'; reason: string };
@@ -76,7 +76,9 @@ export function sessionResumable(
   if (session.limit.resetAt === null) {
     return { ok: false, reason: 'no reset time could be read' };
   }
-  if (now < session.limit.resetAt) {
+  // The same buffer the boundary uses: a request a second after the stated
+  // reset can still be refused, and we would be retrying blind.
+  if (now < session.limit.resetAt + Math.max(0, config.boundaryBufferMs)) {
     return { ok: false, reason: 'the stated reset has not passed yet' };
   }
 
@@ -109,7 +111,19 @@ export function idleClaimAllowed(
   return { ok: true, reason: 'allowed' };
 }
 
-/** What should happen at this instant, for this actor. */
+/**
+ * What should happen at this instant, for this actor.
+ *
+ * Continuing and claiming are separate questions, and conflating them stranded
+ * work. A session whose stated reset has passed can be continued *now* — the
+ * window is already running and continuing it costs no boundary. Gating that on
+ * `isBoundaryDue` meant that when two sessions were interrupted, the first one
+ * consumed the boundary and the second sat idle for another five hours despite
+ * being eligible the whole time.
+ *
+ * So a resume is offered whenever the session is eligible; it only *claims* the
+ * boundary when one is actually due.
+ */
 export function decideClaim(
   state: State,
   config: Config,
@@ -126,14 +140,9 @@ export function decideClaim(
   if (state.globalPaused) {
     return { action: 'none', reason: 'paused globally (ckm resume --all to re-enable)' };
   }
-  if (!isBoundaryDue(state.ledger, now, config.boundaryBufferMs)) {
-    return { action: 'none', reason: 'boundary not due' };
-  }
-  if (reservedByOther(state.ledger, actor.id, now)) {
-    return { action: 'none', reason: 'another actor is already acting on this boundary' };
-  }
 
-  const boundary = nextBoundary(state.ledger);
+  const boundaryDue = isBoundaryDue(state.ledger, now, config.boundaryBufferMs);
+  const boundaryFree = boundaryDue && !reservedByOther(state.ledger, actor.id, now);
 
   if (config.autoContinue) {
     // Oldest interruption first, so the longest-waiting task goes first.
@@ -146,14 +155,19 @@ export function decideClaim(
       return {
         action: 'resume',
         sessionId: mine.sessionId,
-        reason: `continuing "${mine.name}" (${candidates.length} pending)`,
+        // Only spends the boundary if one is due and nobody else holds it.
+        claimsBoundary: boundaryFree,
+        reason: boundaryFree
+          ? `continuing "${mine.name}" (${candidates.length} pending), claiming the boundary`
+          : `continuing "${mine.name}" inside the current window`,
       };
     }
 
     const other = candidates[0];
-    if (other) {
+    if (other && boundaryDue) {
       // Someone else owns that PTY. Hold off rather than consuming the boundary
       // they need — but not indefinitely, in case that process is gone.
+      const boundary = nextBoundary(state.ledger);
       const graceOver =
         boundary !== null && now >= boundary + config.boundaryBufferMs + config.resumeDeferGraceMs;
       if (!graceOver) {
@@ -164,6 +178,12 @@ export function decideClaim(
         };
       }
     }
+  }
+
+  // Everything below spends a boundary, so from here on one has to be available.
+  if (!boundaryDue) return { action: 'none', reason: 'boundary not due' };
+  if (reservedByOther(state.ledger, actor.id, now)) {
+    return { action: 'none', reason: 'another actor is already acting on this boundary' };
   }
 
   const idle = idleClaimAllowed(state, config, now);

@@ -16,7 +16,7 @@ import { DEFAULT_CONFIG, type Config } from '../src/config/index.js';
 import type { LimitEvent, State, SupervisedSession } from '../src/state/schema.js';
 import { emptyState } from '../src/state/schema.js';
 import { WINDOW_MS } from '../src/window/ledger.js';
-import { absorbLimit, tick } from '../src/supervisor/index.js';
+import { absorbLimit, absorbUserRecovery, tick } from '../src/supervisor/index.js';
 import { mutateState, readState } from '../src/state/store.js';
 
 let ckmHome: string;
@@ -193,6 +193,49 @@ describe('tick — two actors on one boundary', () => {
     expect(resumed).toHaveLength(1);
   });
 
+  /**
+   * Through `tick`, not through the helper.
+   *
+   * `absorbUserRecovery` had unit tests and the call site had none, so removing
+   * the call left the whole suite green — the same shape as the audit's finding
+   * that the PID-reuse guard was tested as a function and unwired in practice.
+   */
+  it('stops waiting once the user has carried on in that session themselves', async () => {
+    const boundary = await seedPendingSession();
+
+    // A real transcript for this session, with a user turn after the limit.
+    const projectDir = path.join(claudeHome, 'projects', 'proj');
+    fs.mkdirSync(projectDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(projectDir, `${SESSION_ID}.jsonl`),
+      [
+        JSON.stringify({
+          type: 'user',
+          timestamp: new Date(boundary - 1800_000 - 1000).toISOString(),
+          message: { role: 'user', content: [{ type: 'text', text: 'before the limit' }] },
+        }),
+        JSON.stringify({
+          type: 'user',
+          timestamp: new Date(boundary - 60_000).toISOString(),
+          message: { role: 'user', content: [{ type: 'text', text: 'ok lets look at the parser' }] },
+        }),
+      ].join('\n') + '\n',
+    );
+
+    let typed = false;
+    await tick({
+      actor: { id: 'wrapper-1', ownSessionId: SESSION_ID },
+      resume: async () => {
+        typed = true;
+        return true;
+      },
+      config,
+    });
+
+    expect(typed).toBe(false);
+    expect(readState().sessions[SESSION_ID]?.pendingResume).toBe(false);
+  });
+
   it('a paused session is left alone, and nothing else claims the boundary', async () => {
     await seedPendingSession();
     await mutateState((s) => ({
@@ -296,5 +339,72 @@ describe('absorbLimit', () => {
       raw: "You've reached your Fable 5 limit. Run /usage-credits to continue",
     };
     expect(absorbLimit(state, SESSION_ID, model, now).sessions[SESSION_ID]?.pendingResume).toBe(false);
+  });
+});
+
+/**
+ * A session the user rescued themselves.
+ *
+ * Nothing cleared `pendingResume` except our own successful continuation, so a
+ * session that came back to life any other way stayed flagged — and hours later
+ * `continue` landed in the middle of unrelated live work. Reachable whenever the
+ * first attempt was declined: a draft in the box, a pause later lifted, or the
+ * machine asleep while the user typed.
+ */
+describe('absorbUserRecovery', () => {
+  const now = Date.UTC(2026, 7, 9, 14, 0);
+
+  function pending(): State {
+    return {
+      ...emptyState(now),
+      sessions: {
+        [SESSION_ID]: {
+          sessionId: SESSION_ID,
+          pid: 1,
+          procStart: null,
+          cwd: '/repo',
+          name: 'repo',
+          ptyOwned: true,
+          sessionStatus: 'idle',
+          hasDraftInput: false,
+          supervisedFrom: now - 7200_000,
+          paused: false,
+          pendingResume: true,
+          resumeCount: 0,
+          limit: {
+            kind: 'session',
+            detectedAt: now - 3600_000,
+            resetAt: now - 60_000,
+            raw: "You've hit your session limit",
+          },
+          missedLivenessChecks: 0,
+          registeredAt: now - 7200_000,
+          updatedAt: now,
+        },
+      },
+    };
+  }
+
+  it('stops waiting once the user has carried on themselves', () => {
+    const turns = [now - 3600_000 - 10, now - 30_000]; // one before the limit, one after
+    const next = absorbUserRecovery(pending(), SESSION_ID, turns);
+    expect(next.sessions[SESSION_ID]?.pendingResume).toBe(false);
+  });
+
+  it('keeps waiting when every turn predates the limit', () => {
+    const turns = [now - 7200_000, now - 3600_001];
+    const next = absorbUserRecovery(pending(), SESSION_ID, turns);
+    expect(next.sessions[SESSION_ID]?.pendingResume).toBe(true);
+  });
+
+  it('does nothing for a session that was not waiting', () => {
+    const state = pending();
+    state.sessions[SESSION_ID]!.pendingResume = false;
+    expect(absorbUserRecovery(state, SESSION_ID, [now])).toBe(state);
+  });
+
+  it('does nothing for an unknown session', () => {
+    const state = pending();
+    expect(absorbUserRecovery(state, 'nope', [now])).toBe(state);
   });
 });
