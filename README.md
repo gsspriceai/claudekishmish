@@ -24,7 +24,7 @@ the terminal, which looks identical to working.
 
 Then use `claude` exactly as you always have.
 
-Prefer it illustrated? [**docs/install-guide.html**](docs/install-guide.html) is the same three steps with the terminal output, the window model drawn out, and every command explained on one page. Open it in a browser, or print it.
+Prefer it illustrated? **[gsspriceai.github.io/claudekishmish](https://gsspriceai.github.io/claudekishmish/)** is the same three steps with the terminal output, the window model drawn out, and every command explained on one page. Source: [`docs/index.html`](docs/index.html).
 
 Windows, macOS and Linux — with one note about macOS below.
 
