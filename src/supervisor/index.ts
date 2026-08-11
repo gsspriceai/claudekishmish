@@ -38,11 +38,13 @@ import {
   allUserTurnTimes,
   findTranscript,
   latestLimitEvent,
+  latestOutageEvent,
   readSince,
   userTurnTimes,
 } from '../claude/transcript.js';
 import { checkSessionLiveness, readSessionFiles, type LivenessResult } from '../claude/sessions.js';
 import { haltExpiry } from '../claude/failure.js';
+import { nextRetryAt, type OutageEvent } from '../claude/outage.js';
 
 /** How many consecutive unreadable liveness checks before we give up on a session. */
 const MAX_MISSED_LIVENESS = 5;
@@ -57,6 +59,7 @@ interface SessionObservation {
   sessionId: string;
   turns: number[];
   limit: LimitEvent | null;
+  outage: OutageEvent | null;
   liveness: LivenessResult;
   /** Claude Code's own status for the session: idle / busy / shell. */
   status: string | null;
@@ -77,7 +80,7 @@ function observe(state: State, ownSessionId: string | null): SessionObservation[
 
     const file = findTranscript(id);
     if (!file) {
-      out.push({ sessionId: id, turns: [], limit: null, liveness, status });
+      out.push({ sessionId: id, turns: [], limit: null, outage: null, liveness, status });
       continue;
     }
 
@@ -89,11 +92,75 @@ function observe(state: State, ownSessionId: string | null): SessionObservation[
       sessionId: id,
       turns: userTurnTimes(records),
       limit: latestLimitEvent(records),
+      outage: latestOutageEvent(records, loadConfig().outageBackoffMs),
       liveness,
       status,
     });
   }
   return out;
+}
+
+/**
+ * Fold an API outage into the session record.
+ *
+ * The delicate part is `attempts`. Every failed continuation writes a *new*
+ * error record to the transcript, so treating each record as a fresh outage
+ * would reset the counter every time and turn a hard cap into an infinite
+ * retry loop against an API that is already failing.
+ *
+ * So an outage is an *episode*, not a record: while the session has an
+ * unrecovered outage, a newer error record updates what we know about it and
+ * keeps the count. The episode ends only when the user's own turn appears after
+ * it (`absorbUserRecovery`), which is the one unambiguous sign work resumed.
+ */
+export function absorbOutage(
+  state: State,
+  sessionId: string,
+  event: OutageEvent,
+  config: Config,
+  now: number,
+): State {
+  const session = state.sessions[sessionId];
+  if (!session) return state;
+
+  // Same rule limits obey: an error from before we took charge belongs to an
+  // earlier run of this session id.
+  if (event.detectedAt < session.supervisedFrom) return state;
+
+  // `?? null`, not `!== null`: a session record written by a build that
+  // predates this field has no `outage` key at all, so it arrives as
+  // `undefined`. Comparing that against `null` is true, and the next line then
+  // reads `.detectedAt` off nothing — every tick after an upgrade would throw,
+  // on exactly the machines that already had work in flight.
+  const existing = session.outage ?? null;
+  const sameEpisode = existing !== null && event.detectedAt >= existing.detectedAt;
+  if (existing && event.detectedAt === existing.detectedAt) return state;
+
+  const attempts = sameEpisode ? existing.attempts : 0;
+  const outage: OutageEvent = {
+    ...event,
+    attempts,
+    retryAt: sameEpisode
+      ? nextRetryAt(now, attempts, config.outageBackoffMs, config.outageBackoffCapMs)
+      : event.retryAt,
+  };
+
+  logInfo('outage.detected', {
+    sessionId,
+    error: event.error,
+    status: event.status,
+    raw: event.raw,
+    attempts,
+    retryInMs: Math.max(0, outage.retryAt - now),
+  });
+
+  return {
+    ...state,
+    sessions: {
+      ...state.sessions,
+      [sessionId]: { ...session, outage, pendingResume: true, updatedAt: now },
+    },
+  };
 }
 
 /** Fold a limit event into the ledger and the session record. */
@@ -149,9 +216,13 @@ export function absorbLimit(state: State, sessionId: string | null, event: Limit
  */
 export function absorbUserRecovery(state: State, sessionId: string, turns: number[]): State {
   const session = state.sessions[sessionId];
-  if (!session?.pendingResume || !session.limit) return state;
+  if (!session?.pendingResume) return state;
 
-  const recoveredAt = turns.find((t) => t > session.limit!.detectedAt);
+  // Whichever stopped the work is what the user has to have carried on past.
+  const stoppedAt = session.limit?.detectedAt ?? session.outage?.detectedAt;
+  if (stoppedAt === undefined) return state;
+
+  const recoveredAt = turns.find((t) => t > stoppedAt);
   if (recoveredAt === undefined) return state;
 
   logInfo('resume.no_longer_needed', { sessionId, reason: 'the user carried on themselves' });
@@ -159,7 +230,15 @@ export function absorbUserRecovery(state: State, sessionId: string, turns: numbe
     ...state,
     sessions: {
       ...state.sessions,
-      [sessionId]: { ...session, pendingResume: false, updatedAt: Date.now() },
+      [sessionId]: {
+        ...session,
+        pendingResume: false,
+        // The episode is over, so the next outage starts its count from zero.
+        // Left in place, a single bad afternoon would exhaust the cap for the
+        // rest of the session's life.
+        outage: null,
+        updatedAt: Date.now(),
+      },
     },
   };
 }
@@ -262,6 +341,12 @@ export async function tick(ctx: TickContext): Promise<ClaimDecision> {
           next = absorbLimit(next, obs.sessionId, obs.limit, now);
         }
       }
+      // After the limit, deliberately. A limit outranks an outage: retrying
+      // during one cannot succeed, and the limit knows exactly how long to
+      // wait, so it must not be displaced by a guess.
+      if (obs.outage) {
+        next = absorbOutage(next, obs.sessionId, obs.outage, ctx.config, now);
+      }
     }
 
     const d = decideClaim(next, ctx.config, now, ctx.actor);
@@ -312,6 +397,23 @@ export async function tick(ctx: TickContext): Promise<ClaimDecision> {
             ...session,
             pendingResume: ok ? false : session.pendingResume,
             resumeCount: session.resumeCount + (ok ? 1 : 0),
+            // An outage retry is a guess, and the guess has now been spent.
+            // Counted here rather than on detection, because a continuation we
+            // declined to send (a draft in the box, a pause) must not consume
+            // one of the few attempts the cap allows.
+            outage:
+              ok && session.outage && !session.limit
+                ? {
+                    ...session.outage,
+                    attempts: session.outage.attempts + 1,
+                    retryAt: nextRetryAt(
+                      Date.now(),
+                      session.outage.attempts + 1,
+                      ctx.config.outageBackoffMs,
+                      ctx.config.outageBackoffCapMs,
+                    ),
+                  }
+                : session.outage,
             updatedAt: Date.now(),
           },
         };

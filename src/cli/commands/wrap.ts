@@ -151,6 +151,7 @@ export async function runWrap(args: string[]): Promise<number> {
       pendingResume: false,
       resumeCount: 0,
       limit: null,
+      outage: null,
     });
   } else if (childExit === null && interactive) {
     // A one-shot command was never going to be supervised, and a child that has

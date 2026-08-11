@@ -57,7 +57,19 @@ export function sessionResumable(
   if (session.paused) return { ok: false, reason: 'session paused by user' };
   if (!session.pendingResume) return { ok: false, reason: 'nothing pending' };
   if (!session.ptyOwned) return { ok: false, reason: 'we do not own this pty' };
-  if (!session.limit) return { ok: false, reason: 'no recorded limit' };
+
+  // An outage takes the same road as a limit, on purpose: every guard above and
+  // below applies to both, and the injection path is shared. What differs is
+  // only what we are waiting for — a stated reset, or a backoff we chose.
+  //
+  // A limit outranks an outage. Retrying during a limit cannot succeed, and the
+  // limit knows exactly how long to wait, so if both are recorded the limit is
+  // what gets waited out.
+  if (!session.limit) {
+    return session.outage
+      ? outageResumable(session, config, now)
+      : { ok: false, reason: 'no recorded limit' };
+  }
 
   if (session.limit.kind === 'model') {
     return { ok: false, reason: 'model limit is out of scope — waiting cannot clear it' };
@@ -89,6 +101,60 @@ export function sessionResumable(
     };
   }
   return { ok: true, reason: 'eligible' };
+}
+
+/**
+ * When work on this session actually stopped, whichever cause stopped it.
+ *
+ * Used only for ordering, so the longest-waiting task is continued first. A
+ * session with neither is not a candidate and never reaches here.
+ */
+function interruptedAt(session: SupervisedSession): number {
+  return session.limit?.detectedAt ?? session.outage?.detectedAt ?? 0;
+}
+
+/**
+ * Is this session ready for another attempt after an API outage?
+ *
+ * Deliberately stricter than the limit path in one respect and looser in
+ * another. Stricter: an outage states no reset time, so every attempt is a
+ * guess and the number of guesses is hard-capped. Looser: there is no boundary
+ * to wait for, because the window is still running — continuing here spends the
+ * allowance the user is already inside, not a new one.
+ */
+export function outageResumable(
+  session: SupervisedSession,
+  config: Config,
+  now: number,
+): { ok: boolean; reason: string } {
+  // `?? null` for the same reason as in `absorbOutage`: a record from an
+  // older build has no such key.
+  const outage = session.outage ?? null;
+  if (!outage) return { ok: false, reason: 'no recorded outage' };
+
+  // The same rule limits obey: a transcript is reused across resumes, so an
+  // error from an earlier run of this session id is history. Acting on it would
+  // type into a terminal the user has only just opened.
+  if (outage.detectedAt < session.supervisedFrom) {
+    return { ok: false, reason: 'outage predates this session — historical, not live' };
+  }
+  if (outage.attempts >= config.maxOutageRetries) {
+    return {
+      ok: false,
+      reason: `outage retry cap reached (${outage.attempts}/${config.maxOutageRetries}) — ${outage.raw}`,
+    };
+  }
+  if (now < outage.retryAt) {
+    const secs = Math.ceil((outage.retryAt - now) / 1000);
+    return { ok: false, reason: `backing off after "${outage.raw}" — ${secs}s to go` };
+  }
+  if (session.resumeCount >= config.maxResumesPerSession) {
+    return {
+      ok: false,
+      reason: `resume cap reached (${session.resumeCount}/${config.maxResumesPerSession})`,
+    };
+  }
+  return { ok: true, reason: `retrying after "${outage.raw}"` };
 }
 
 /** Is an idle ping allowed right now? */
@@ -148,7 +214,7 @@ export function decideClaim(
     // Oldest interruption first, so the longest-waiting task goes first.
     const candidates = Object.values(state.sessions)
       .filter((s) => sessionResumable(s, config, now).ok)
-      .sort((a, b) => (a.limit?.detectedAt ?? 0) - (b.limit?.detectedAt ?? 0));
+      .sort((a, b) => interruptedAt(a) - interruptedAt(b));
 
     const mine = candidates.find((s) => s.sessionId === actor.ownSessionId);
     if (mine) {

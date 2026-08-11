@@ -68,6 +68,7 @@ function session(over: Partial<SupervisedSession> = {}): SupervisedSession {
     paused: false,
     pendingResume: true,
     resumeCount: 0,
+    outage: null,
     limit: {
       kind: 'session',
       detectedAt: now - 3600_000,
@@ -362,5 +363,71 @@ describe('the ledger is reconciled against history on every tick', () => {
     const after = readState().ledger;
     expect(after.currentEnd).toBe(truth.end);
     expect(after.source).toBe('computed');
+  });
+});
+
+/**
+ * The outage path, at its call site.
+ *
+ * `absorbOutage` and `outageResumable` are unit-tested. This proves `tick`
+ * actually reads outages out of a transcript and records them — the
+ * guard-with-no-caller shape that has now bitten this codebase ten times, most
+ * recently in the state lock two commits ago.
+ */
+describe('an API outage is picked up from the transcript', () => {
+  function writeOutageTranscript(at: number, text: string, error: string, status?: number): void {
+    const dir = path.join(claudeHome, 'projects', 'some-project');
+    fs.mkdirSync(dir, { recursive: true });
+    const rec: Record<string, unknown> = {
+      type: 'assistant',
+      error,
+      isApiErrorMessage: true,
+      timestamp: new Date(at).toISOString(),
+      message: { content: [{ type: 'text', text }] },
+    };
+    if (status !== undefined) rec.apiErrorStatus = status;
+    fs.writeFileSync(path.join(dir, `${SESSION_ID}.jsonl`), JSON.stringify(rec) + '\n', 'utf8');
+  }
+
+  it('records it, and schedules a retry rather than firing immediately', async () => {
+    clearTurnCache();
+    const now = Date.now();
+    writeOutageTranscript(now - 1_000, 'API Error: Overloaded', 'unknown', 529);
+
+    await mutateState(() => ({
+      ...emptyState(now),
+      sessions: { [SESSION_ID]: session({ limit: null, pendingResume: false }) },
+    }));
+
+    await tick({ actor: { id: 'd', ownSessionId: null }, resume: async () => false, config });
+
+    const after = readState().sessions[SESSION_ID]!;
+    expect(after.outage).not.toBeNull();
+    expect(after.outage!.status).toBe(529);
+    expect(after.pendingResume).toBe(true);
+    // Not yet: the backoff has to pass first.
+    expect(after.outage!.retryAt).toBeGreaterThan(now);
+    expect(after.outage!.attempts).toBe(0);
+  });
+
+  it('does not mistake an authentication failure for an outage', async () => {
+    // 33 of them in the real history. Retrying one is exactly what makes a
+    // background tool intolerable.
+    clearTurnCache();
+    const now = Date.now();
+    writeOutageTranscript(
+      now - 1_000,
+      'Failed to authenticate: OAuth session expired and could not be refreshed',
+      'authentication_failed',
+    );
+
+    await mutateState(() => ({
+      ...emptyState(now),
+      sessions: { [SESSION_ID]: session({ limit: null, pendingResume: false }) },
+    }));
+
+    await tick({ actor: { id: 'd', ownSessionId: null }, resume: async () => false, config });
+
+    expect(readState().sessions[SESSION_ID]!.outage).toBeNull();
   });
 });

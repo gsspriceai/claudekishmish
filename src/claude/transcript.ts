@@ -17,6 +17,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { claudeProjectsDir } from '../platform/paths.js';
 import { toLimitEvent, type TranscriptRecord } from './limits.js';
+import { toOutageEvent, type OutageEvent } from './outage.js';
 import type { LimitEvent } from '../state/schema.js';
 
 /** Locate the transcript for a session id, searching every project directory. */
@@ -105,6 +106,24 @@ export function readSince(
 export function latestLimitEvent(records: TranscriptRecord[], now = new Date()): LimitEvent | null {
   for (let i = records.length - 1; i >= 0; i--) {
     const event = toLimitEvent(records[i]!, now);
+    if (event) return event;
+  }
+  return null;
+}
+
+/**
+ * The most recent retryable API outage in a set of records, if any.
+ *
+ * Scanned newest-first like limits: only the latest failure matters, because an
+ * older one has either been recovered from or is the same outage still running.
+ */
+export function latestOutageEvent(
+  records: TranscriptRecord[],
+  backoffMs: number,
+  now = new Date(),
+): OutageEvent | null {
+  for (let i = records.length - 1; i >= 0; i--) {
+    const event = toOutageEvent(records[i]!, now, backoffMs);
     if (event) return event;
   }
   return null;
