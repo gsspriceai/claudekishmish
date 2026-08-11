@@ -1,0 +1,615 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>claudekishmish — install guide</title>
+<meta name="description" content="Install guide for claudekishmish - keep a Claude Code usage window always running, and continue interrupted work in the terminal it stopped in." />
+<style>
+  /* Minimal reset: the artifact host supplies one, a file on disk must carry
+     its own so it renders the same opened locally or printed. */
+  *, *::before, *::after { box-sizing: border-box; }
+  body { margin: 0; }
+  img, svg { max-width: 100%; }
+
+  /* ---- Tokens: complete light palette on bare :root ---------------------- */
+  :root {
+    --paper:      #FBF6F3;
+    --paper-2:    #F3EAE6;
+    --ink:        #241B22;
+    --ink-soft:   #6E5F68;
+    --ink-faint:  #A2919B;
+    --rule:       #E2D4CE;
+
+    --raisin:     #6B3050;   /* accent — the fruit the tool is named for */
+    --raisin-dim: #A97B93;
+    --amber:      #B4651A;   /* a claimed window */
+    --amber-soft: #F0DCC5;
+
+    --ok:         #3F6B4F;
+    --warn:       #9A6410;
+    --dead:       #DCCFC9;   /* an unclaimed boundary */
+
+    --term-bg:    #241B22;
+    --term-fg:    #E9DDE4;
+    --term-dim:   #9B8792;
+    --term-rule:  #3D2F38;
+
+    --shadow: 0 1px 2px rgba(36,27,34,.06), 0 8px 24px -12px rgba(36,27,34,.18);
+
+    --display: ui-serif, "Iowan Old Style", "Palatino Linotype", Palatino, Georgia, serif;
+    --body: ui-sans-serif, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+    --mono: ui-monospace, "Cascadia Code", "SF Mono", Menlo, Consolas, monospace;
+  }
+
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --paper:      #191317;
+      --paper-2:    #221A1F;
+      --ink:        #EFE5EA;
+      --ink-soft:   #B3A2AC;
+      --ink-faint:  #7C6C76;
+      --rule:       #362A31;
+
+      --raisin:     #D799BC;
+      --raisin-dim: #8A5E75;
+      --amber:      #E0A05A;
+      --amber-soft: #3A2A1C;
+
+      --ok:         #7FB894;
+      --warn:       #D9A44E;
+      --dead:       #332830;
+
+      --term-bg:    #120D10;
+      --term-fg:    #E9DDE4;
+      --term-dim:   #8D7A85;
+      --term-rule:  #2C2128;
+
+      --shadow: 0 1px 2px rgba(0,0,0,.5), 0 10px 30px -14px rgba(0,0,0,.7);
+    }
+  }
+
+  :root[data-theme="dark"] {
+    --paper:      #191317;
+    --paper-2:    #221A1F;
+    --ink:        #EFE5EA;
+    --ink-soft:   #B3A2AC;
+    --ink-faint:  #7C6C76;
+    --rule:       #362A31;
+
+    --raisin:     #D799BC;
+    --raisin-dim: #8A5E75;
+    --amber:      #E0A05A;
+    --amber-soft: #3A2A1C;
+
+    --ok:         #7FB894;
+    --warn:       #D9A44E;
+    --dead:       #332830;
+
+    --term-bg:    #120D10;
+    --term-fg:    #E9DDE4;
+    --term-dim:   #8D7A85;
+    --term-rule:  #2C2128;
+
+    --shadow: 0 1px 2px rgba(0,0,0,.5), 0 10px 30px -14px rgba(0,0,0,.7);
+  }
+
+  /* ---- Base -------------------------------------------------------------- */
+  * { box-sizing: border-box; }
+
+  body {
+    margin: 0;
+    background: var(--paper);
+    color: var(--ink);
+    font-family: var(--body);
+    font-size: 17px;
+    line-height: 1.65;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  .wrap {
+    max-width: 46rem;
+    margin: 0 auto;
+    padding: 3.5rem 1.5rem 6rem;
+  }
+
+  h1, h2, h3 { font-family: var(--display); font-weight: 600; text-wrap: balance; line-height: 1.15; margin: 0; }
+  p { margin: 0; max-width: 65ch; }
+  a { color: var(--raisin); text-decoration-thickness: 1px; text-underline-offset: 3px; }
+  a:focus-visible, summary:focus-visible { outline: 2px solid var(--raisin); outline-offset: 3px; border-radius: 2px; }
+
+  .eyebrow {
+    font-family: var(--mono);
+    font-size: .72rem;
+    letter-spacing: .13em;
+    text-transform: uppercase;
+    color: var(--ink-faint);
+  }
+
+  section { display: flex; flex-direction: column; gap: 1.1rem; }
+  .stack  { display: flex; flex-direction: column; gap: 1.1rem; }
+  .stack-tight { display: flex; flex-direction: column; gap: .5rem; }
+
+  hr.rule { border: 0; border-top: 1px solid var(--rule); margin: 3.25rem 0; }
+
+  /* ---- Masthead ---------------------------------------------------------- */
+  .mast { display: flex; flex-direction: column; gap: 1.25rem; }
+
+  .wordmark {
+    font-family: var(--display);
+    font-size: clamp(2.6rem, 8vw, 3.9rem);
+    letter-spacing: -.02em;
+    line-height: 1;
+  }
+  .wordmark em { font-style: normal; color: var(--raisin); }
+
+  .tagline { font-size: 1.2rem; color: var(--ink-soft); max-width: 34ch; }
+
+  .badges { display: flex; flex-wrap: wrap; gap: .45rem; font-family: var(--mono); font-size: .74rem; }
+  .badge {
+    border: 1px solid var(--rule);
+    border-radius: 999px;
+    padding: .18rem .6rem;
+    color: var(--ink-soft);
+    background: var(--paper-2);
+  }
+
+  /* ---- Terminal ---------------------------------------------------------- */
+  .term {
+    background: var(--term-bg);
+    color: var(--term-fg);
+    border-radius: 10px;
+    box-shadow: var(--shadow);
+    overflow: hidden;
+    font-family: var(--mono);
+    font-size: .82rem;
+    line-height: 1.62;
+  }
+  .term-bar {
+    display: flex; align-items: center; gap: .5rem;
+    padding: .5rem .8rem;
+    border-bottom: 1px solid var(--term-rule);
+    color: var(--term-dim);
+    font-size: .7rem;
+    letter-spacing: .06em;
+  }
+  .dot { width: .55rem; height: .55rem; border-radius: 50%; background: var(--term-rule); flex: none; }
+  .term-body { padding: .9rem 1rem; overflow-x: auto; }
+  .term-body pre { margin: 0; font: inherit; white-space: pre; }
+
+  .p  { color: var(--raisin-dim); }         /* prompt */
+  .c  { color: var(--term-fg); }            /* command */
+  .d  { color: var(--term-dim); }           /* dim output */
+  .g  { color: #7FB894; }                   /* ok */
+  .y  { color: #D9A44E; }                   /* warn */
+  .r  { color: #E08A8A; }                   /* bad */
+  .a  { color: #E0A05A; }                   /* highlight */
+
+  /* ---- Steps ------------------------------------------------------------- */
+  ol.steps { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 2rem; counter-reset: step; }
+  ol.steps > li { display: grid; grid-template-columns: 2rem 1fr; gap: 0 1rem; align-items: start; }
+  ol.steps > li::before {
+    counter-increment: step;
+    content: counter(step);
+    font-family: var(--mono);
+    font-size: .8rem;
+    color: var(--raisin);
+    border: 1px solid var(--raisin-dim);
+    border-radius: 50%;
+    width: 1.8rem; height: 1.8rem;
+    display: grid; place-items: center;
+    margin-top: .1rem;
+  }
+  ol.steps h3 { font-size: 1.16rem; margin-bottom: .35rem; }
+  ol.steps .step-body { display: flex; flex-direction: column; gap: .75rem; min-width: 0; }
+
+  /* ---- Callout ----------------------------------------------------------- */
+  .note {
+    border-left: 3px solid var(--amber);
+    background: var(--amber-soft);
+    padding: .85rem 1rem;
+    border-radius: 0 6px 6px 0;
+    font-size: .94rem;
+  }
+  .note strong { color: var(--ink); }
+
+  /* ---- The window strip (core illustration) ------------------------------ */
+  .figure { display: flex; flex-direction: column; gap: .7rem; }
+  .figure figcaption { font-size: .84rem; color: var(--ink-soft); font-family: var(--body); }
+
+  .strip { display: flex; gap: 3px; align-items: flex-end; height: 3.4rem; }
+  .strip span { flex: 1 1 0; border-radius: 2px; background: var(--dead); }
+  .strip span.claimed { background: var(--amber); height: 100%; }
+  .strip span.unclaimed { height: 38%; }
+
+  .legend { display: flex; flex-wrap: wrap; gap: 1.1rem; font-size: .82rem; color: var(--ink-soft); font-family: var(--mono); }
+  .legend i { display: inline-block; width: .8rem; height: .8rem; border-radius: 2px; vertical-align: -1px; margin-right: .4rem; }
+
+  /* ---- Day timeline ------------------------------------------------------ */
+  .day { display: flex; flex-direction: column; gap: .55rem; }
+  .day-row { display: grid; grid-template-columns: 5.5rem 1fr; gap: .8rem; align-items: center; }
+  .day-label { font-family: var(--mono); font-size: .72rem; color: var(--ink-faint); text-align: right; letter-spacing: .04em; }
+  .track { position: relative; height: 1.5rem; background: var(--paper-2); border-radius: 4px; overflow: hidden; display: flex; }
+  .blk { height: 100%; display: grid; place-items: center; font-family: var(--mono); font-size: .66rem; letter-spacing: .04em; }
+  .blk.win { background: var(--amber); color: #2B1A08; }
+  .blk.gap { background: repeating-linear-gradient(135deg, var(--dead), var(--dead) 5px, transparent 5px, transparent 10px); color: var(--ink-faint); }
+
+  .hours { display: grid; grid-template-columns: 5.5rem 1fr; gap: .8rem; }
+  .hours-marks { display: flex; justify-content: space-between; font-family: var(--mono); font-size: .66rem; color: var(--ink-faint); }
+
+  /* ---- Usage panel illustration ------------------------------------------ */
+  .panel {
+    border: 1px solid var(--rule);
+    border-radius: 10px;
+    background: var(--paper-2);
+    padding: 1.1rem 1.15rem;
+    display: flex;
+    flex-direction: column;
+    gap: 1rem;
+    box-shadow: var(--shadow);
+  }
+  .panel-head { display: flex; align-items: baseline; justify-content: space-between; gap: 1rem; }
+  .panel-head b { font-family: var(--display); font-size: 1rem; font-weight: 600; }
+  .meter-row { display: flex; flex-direction: column; gap: .3rem; }
+  .meter-top { display: flex; justify-content: space-between; align-items: baseline; gap: 1rem; font-size: .86rem; }
+  .meter-top .sub { color: var(--ink-faint); font-family: var(--mono); font-size: .72rem; }
+  .meter { height: .5rem; border-radius: 999px; background: var(--rule); overflow: hidden; }
+  .meter i { display: block; height: 100%; background: var(--raisin); border-radius: 999px; }
+  .num { font-family: var(--mono); font-variant-numeric: tabular-nums; font-size: .8rem; color: var(--ink-soft); }
+
+  /* ---- Command table ----------------------------------------------------- */
+  .table-wrap { overflow-x: auto; }
+  table { border-collapse: collapse; width: 100%; font-size: .92rem; }
+  th, td { text-align: left; padding: .6rem .7rem; border-bottom: 1px solid var(--rule); vertical-align: top; }
+  th { font-family: var(--mono); font-size: .68rem; letter-spacing: .12em; text-transform: uppercase; color: var(--ink-faint); font-weight: 400; }
+  td code { font-family: var(--mono); font-size: .84rem; color: var(--raisin); white-space: nowrap; }
+  td:first-child { width: 12rem; }
+
+  /* ---- Feature pair ------------------------------------------------------ */
+  .jobs { display: grid; gap: 1.1rem; grid-template-columns: 1fr; }
+  @media (min-width: 40rem) { .jobs { grid-template-columns: 1fr 1fr; } }
+  .job {
+    border: 1px solid var(--rule);
+    border-radius: 10px;
+    padding: 1.1rem;
+    background: var(--paper-2);
+    display: flex; flex-direction: column; gap: .5rem;
+  }
+  .job .eyebrow { color: var(--raisin); }
+  .job h3 { font-size: 1.08rem; }
+  .job p { font-size: .93rem; color: var(--ink-soft); }
+
+  .facts { display: flex; flex-wrap: wrap; gap: 1.6rem; }
+  .fact { display: flex; flex-direction: column; gap: .1rem; }
+  .fact b { font-family: var(--mono); font-size: 1.5rem; font-variant-numeric: tabular-nums; color: var(--ink); font-weight: 500; }
+  .fact span { font-size: .78rem; color: var(--ink-faint); font-family: var(--mono); letter-spacing: .04em; }
+
+  footer { margin-top: 4rem; padding-top: 1.5rem; border-top: 1px solid var(--rule); font-size: .86rem; color: var(--ink-faint); display: flex; flex-direction: column; gap: .35rem; }
+
+  @media (prefers-reduced-motion: no-preference) {
+    .strip span { transition: background .2s ease; }
+  }
+
+  /* ---- Print ------------------------------------------------------------- */
+  @media print {
+    /* Paper is paper: force the light palette, or a dark-mode machine prints
+       a black page and burns a cartridge. */
+    :root, :root[data-theme="dark"], :root:not([data-theme="light"]) {
+      --paper: #FFFFFF;  --paper-2: #F6F1ED; --ink: #1F1720;      --ink-soft: #55474F;
+      --ink-faint: #7D6D76; --rule: #DDD0CA; --raisin: #6B3050;   --raisin-dim: #A97B93;
+      --amber: #B4651A;  --amber-soft: #F5E7D6; --ok: #3F6B4F;    --warn: #8A5A0F;
+      --dead: #E0D5D0;   --term-bg: #241B22; --term-fg: #EFE6EA;  --term-dim: #A0909A;
+      --term-rule: #4A3B44; --shadow: none;
+    }
+    body { font-size: 10.5pt; }
+    .wrap { max-width: none; padding: 0; }
+    /* Nothing that reads as one object may be split across a page break. */
+    .term, .panel, .figure, .job, table, ol.steps > li, footer { break-inside: avoid; }
+    h2 { break-after: avoid; }
+    hr.rule { margin: 1.6rem 0; }
+    a { color: var(--ink); text-decoration: none; }
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <header class="mast">
+    <div class="stack-tight">
+      <span class="eyebrow">npm i -g claudekishmish</span>
+      <h1 class="wordmark">claude<em>kishmish</em></h1>
+    </div>
+    <p class="tagline">Keep a Claude Code usage window always running — and continue interrupted work in the terminal it stopped in.</p>
+    <div class="badges">
+      <span class="badge">v0.3.0</span>
+      <span class="badge">Windows · macOS · Linux</span>
+      <span class="badge">MIT</span>
+      <span class="badge">1 dependency</span>
+    </div>
+  </header>
+
+  <hr class="rule" />
+
+  <!-- ============================ WHY ============================ -->
+  <section>
+    <span class="eyebrow">The problem</span>
+    <h2>A window you never claimed is time you never get back</h2>
+    <p>A Claude Code usage window is five hours long. It starts at your <em>first message</em> — and it only advances when someone claims it. If your window ends at 02:00 and you send nothing until 09:00, those seven hours were dead. No window was running, so nothing accrued to you.</p>
+
+    <figure class="figure">
+      <div class="strip" aria-hidden="true">
+        <span class="claimed"></span><span class="unclaimed"></span><span class="unclaimed"></span><span class="claimed"></span><span class="unclaimed"></span><span class="unclaimed"></span><span class="unclaimed"></span><span class="claimed"></span><span class="unclaimed"></span><span class="unclaimed"></span><span class="unclaimed"></span><span class="unclaimed"></span><span class="claimed"></span><span class="unclaimed"></span><span class="unclaimed"></span><span class="unclaimed"></span><span class="unclaimed"></span><span class="unclaimed"></span><span class="claimed"></span><span class="unclaimed"></span><span class="unclaimed"></span><span class="unclaimed"></span><span class="unclaimed"></span><span class="claimed"></span><span class="unclaimed"></span><span class="unclaimed"></span><span class="unclaimed"></span><span class="unclaimed"></span><span class="unclaimed"></span><span class="unclaimed"></span><span class="claimed"></span><span class="unclaimed"></span><span class="unclaimed"></span><span class="unclaimed"></span><span class="unclaimed"></span><span class="claimed"></span><span class="unclaimed"></span><span class="unclaimed"></span><span class="unclaimed"></span><span class="unclaimed"></span><span class="unclaimed"></span><span class="claimed"></span><span class="unclaimed"></span><span class="unclaimed"></span><span class="unclaimed"></span><span class="unclaimed"></span><span class="unclaimed"></span><span class="unclaimed"></span><span class="unclaimed"></span><span class="claimed"></span><span class="unclaimed"></span><span class="unclaimed"></span><span class="unclaimed"></span><span class="unclaimed"></span><span class="unclaimed"></span><span class="unclaimed"></span><span class="unclaimed"></span><span class="unclaimed"></span><span class="unclaimed"></span><span class="unclaimed"></span><span class="unclaimed"></span><span class="unclaimed"></span><span class="unclaimed"></span><span class="unclaimed"></span><span class="unclaimed"></span><span class="unclaimed"></span><span class="unclaimed"></span><span class="unclaimed"></span><span class="unclaimed"></span><span class="unclaimed"></span><span class="unclaimed"></span>
+      </div>
+      <div class="legend">
+        <span><i style="background:var(--amber)"></i>claimed</span>
+        <span><i style="background:var(--dead)"></i>went by unnoticed</span>
+      </div>
+      <figcaption>Every window boundary over one real 49-day history: <strong>62 of 71 went unclaimed.</strong></figcaption>
+    </figure>
+  </section>
+
+  <hr class="rule" />
+
+  <!-- ============================ INSTALL ============================ -->
+  <section>
+    <span class="eyebrow">Install · about two minutes</span>
+    <h2>Three steps, then never think about it again</h2>
+
+    <ol class="steps">
+
+      <li>
+        <div class="step-body">
+          <h3>Install the package</h3>
+          <div class="term">
+            <div class="term-bar"><span class="dot"></span>terminal</div>
+            <div class="term-body"><pre><span class="p">$</span> <span class="c">npm i -g claudekishmish</span>
+
+<span class="a">  claudekishmish</span>
+<span class="d">  Credits to Gantavya Singh Shekhawat</span>
+
+<span class="d">  Next:  ckm setup</span></pre></div>
+          </div>
+        </div>
+      </li>
+
+      <li>
+        <div class="step-body">
+          <h3>Run setup</h3>
+          <p>This writes the shim and the background service, then prints the one thing left for you to do.</p>
+          <div class="term">
+            <div class="term-bar"><span class="dot"></span>terminal</div>
+            <div class="term-body"><pre><span class="p">$</span> <span class="c">ckm setup</span>
+
+<span class="d">  Two steps left — run these yourself:</span>
+
+<span class="d">  1. Put the shim FIRST on PATH —</span>
+<span class="d">     run it once, then open a new terminal:</span>
+
+<span class="a">     [Environment]::SetEnvironmentVariable('Path', ...)</span>
+
+<span class="d">  2. Start the background claimer.</span>
+
+<span class="d">  Both jobs are ON:</span>
+<span class="g">    auto-continue   ON</span><span class="d">   continue interrupted work</span>
+<span class="g">    window claiming ON</span><span class="d">   keep the countdown running</span></pre></div>
+          </div>
+        </div>
+      </li>
+
+      <li>
+        <div class="step-body">
+          <h3>Run the PATH line, then open a new terminal</h3>
+          <p>Not optional. Until the shim is on PATH, only half the tool is running: boundaries get claimed, but nothing is watching your sessions, so nothing can continue your work.</p>
+          <div class="note">
+            <strong>On Windows, use the persistent line setup prints.</strong> The obvious <code>$env:Path = …</code> form lasts only until you close the terminal — and a tool that stopped working looks exactly like a tool that is working.
+          </div>
+        </div>
+      </li>
+
+    </ol>
+
+    <p>That's it. From here, run <code>claude</code> exactly as you always have.</p>
+  </section>
+
+  <hr class="rule" />
+
+  <!-- ============================ CHECK ============================ -->
+  <section>
+    <span class="eyebrow">Confirm</span>
+    <h2>One command tells you which half is running</h2>
+
+    <div class="term">
+      <div class="term-bar"><span class="dot"></span>ckm status</div>
+      <div class="term-body"><pre><span class="p">$</span> <span class="c">ckm status</span>
+
+<span class="d">  Window</span>
+    current ends   11 Aug, 05:10 pm   <span class="d">(computed)</span>
+    next boundary  11 Aug, 05:10 pm   <span class="a">in 3h 52m</span>
+    last claimed   11 Aug, 12:10 pm
+
+<span class="d">  Policy</span>
+    auto-continue  <span class="g">on</span>
+    idle claiming  <span class="g">on</span>   <span class="d">(7/14 used this week)</span>
+
+<span class="d">  Install</span>
+    shim           <span class="g">active</span>
+    daemon         <span class="g">running (pid 37444)</span></pre></div>
+    </div>
+
+    <p><code>shim active</code> is the line that matters. If it says <span style="color:var(--warn)"><strong>installed but NOT on PATH</strong></span>, step 3 didn't take — in-place continuation is off and nothing else will tell you.</p>
+
+    <p>When something misbehaves, <code>ckm doctor</code> checks every dependency by actually running it — no billable request:</p>
+
+    <div class="term">
+      <div class="term-bar"><span class="dot"></span>ckm doctor</div>
+      <div class="term-body"><pre>  [<span class="g">ok</span>  ] claude is spawnable    2.1.227 (Claude Code)
+  [<span class="g">ok</span>  ] node-pty              available — sessions can be continued
+  [<span class="g">ok</span>  ] shim                  ~/.claudekishmish/shim
+  [<span class="g">ok</span>  ] daemon                running (pid 37444)
+
+  <span class="g">No blocking problems.</span></pre></div>
+    </div>
+  </section>
+
+  <hr class="rule" />
+
+  <!-- ============================ THE TWO JOBS ============================ -->
+  <section>
+    <span class="eyebrow">What it does</span>
+    <h2>Two jobs, both on by default</h2>
+
+    <div class="jobs">
+      <div class="job">
+        <span class="eyebrow">Job one</span>
+        <h3>Claims the boundary</h3>
+        <p>The moment a window expires, a minimal request starts the next countdown — even with no terminal open and nobody awake. Capped at 14 a week, announced at setup, and every claim is logged before it happens.</p>
+      </div>
+      <div class="job">
+        <span class="eyebrow">Job two</span>
+        <h3>Continues your work</h3>
+        <p>When a session stops at a limit, the continuation is typed into <em>your actual terminal session</em> once the window reopens. Same window, same context, work carries on.</p>
+      </div>
+    </div>
+
+    <figure class="figure" style="margin-top:.6rem">
+      <div class="day">
+        <div class="day-row">
+          <span class="day-label">without</span>
+          <div class="track">
+            <span class="blk win" style="width:42%">09:00 → 14:00</span>
+            <span class="blk gap" style="width:33%">dead</span>
+            <span class="blk win" style="width:25%">18:00 →</span>
+          </div>
+        </div>
+        <div class="day-row">
+          <span class="day-label">with ckm</span>
+          <div class="track">
+            <span class="blk win" style="width:42%">09:00 → 14:00</span>
+            <span class="blk win" style="width:42%; box-shadow: inset 1px 0 0 var(--paper)">14:00 → 19:00</span>
+            <span class="blk win" style="width:16%; box-shadow: inset 1px 0 0 var(--paper)">19:00 →</span>
+          </div>
+        </div>
+        <div class="hours">
+          <span></span>
+          <div class="hours-marks"><span>09:00</span><span>14:00</span><span>19:00</span><span>21:00</span></div>
+        </div>
+      </div>
+      <figcaption>The same day. Windows only tile if something claims each boundary as it opens.</figcaption>
+    </figure>
+  </section>
+
+  <hr class="rule" />
+
+  <!-- ============================ LIMITS ============================ -->
+  <section>
+    <span class="eyebrow">Three limits, three responses</span>
+    <h2>Not every limit is the same limit</h2>
+    <p>Claude Code has three separate caps, and treating them as one is what makes naive wait-and-retry tools hang for days. This is the panel they come from — <code>/usage</code> inside Claude Code:</p>
+
+    <figure class="figure">
+      <div class="panel">
+        <div class="panel-head"><b>Plan usage limits</b><span class="num">Max (5×)</span></div>
+
+        <div class="meter-row">
+          <div class="meter-top">
+            <span>Current session <span class="sub">resets in 1 min</span></span>
+            <span class="num">22%</span>
+          </div>
+          <div class="meter"><i style="width:22%"></i></div>
+        </div>
+
+        <div class="meter-row">
+          <div class="meter-top">
+            <span>All models <span class="sub">resets Thu 10:30 pm</span></span>
+            <span class="num">63%</span>
+          </div>
+          <div class="meter"><i style="width:63%"></i></div>
+        </div>
+      </div>
+      <figcaption>An illustration of Claude Code's usage panel. <strong>“Current session”</strong> is the five-hour window this tool keeps running.</figcaption>
+    </figure>
+
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>Limit</th><th>What claudekishmish does</th></tr></thead>
+        <tbody>
+          <tr><td><strong>Session</strong><br /><span class="num">every 5 hours</span></td><td>Waits for the stated reset, then continues your work.</td></tr>
+          <tr><td><strong>Weekly</strong></td><td>Parks it, suspends claiming so it can't spend the budget it exists to protect, and tells you.</td></tr>
+          <tr><td><strong>Per-model</strong></td><td>Stops cleanly and hands back. Waiting cannot clear this one, so it doesn't pretend otherwise.</td></tr>
+          <tr><td><strong>API overloaded</strong><br /><span class="num">529 · stalled · dropped</span></td><td>No reset time exists, so it retries on a bounded backoff — 30s, 1m, 2m, 4m, 8m, then stops.</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <p>And if the account itself can't make requests — logged out, subscription ended — it <strong>halts</strong> rather than retrying an impossible request several times a day forever.</p>
+  </section>
+
+  <hr class="rule" />
+
+  <!-- ============================ COMMANDS ============================ -->
+  <section>
+    <span class="eyebrow">Reference</span>
+    <h2>Every command, and when you'd want it</h2>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>Command</th><th>When</th></tr></thead>
+        <tbody>
+          <tr><td><code>ckm setup</code></td><td>Once, after installing.</td></tr>
+          <tr><td><code>ckm status</code></td><td>Windows, boundaries, sessions, and what it will do next.</td></tr>
+          <tr><td><code>ckm pause</code></td><td>Stop auto-continuing this session. <code>--all</code> for everything, before you sleep.</td></tr>
+          <tr><td><code>ckm resume</code></td><td>Switch it back on. Also clears a halt.</td></tr>
+          <tr><td><code>ckm claim off</code></td><td>Stop claiming boundaries when nothing is pending. Auto-continue stays on.</td></tr>
+          <tr><td><code>ckm doctor</code></td><td>Check every dependency by running it. Costs nothing.</td></tr>
+          <tr><td><code>ckm logs</code></td><td>What it did while you were away.</td></tr>
+          <tr><td><code>ckm config</code></td><td>Continuation text, caps, backoff, poll interval.</td></tr>
+          <tr><td><code>ckm uninstall</code></td><td>Remove the shim and the service unit.</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <hr class="rule" />
+
+  <!-- ============================ NIGHT ============================ -->
+  <section>
+    <span class="eyebrow">A real night</span>
+    <h2>What you'd find in the log</h2>
+    <p>Nothing here was typed by a person. This is <code>ckm logs</code> from a machine left running:</p>
+    <div class="term">
+      <div class="term-bar"><span class="dot"></span>ckm logs</div>
+      <div class="term-body"><pre><span class="d">12:10:28</span>  boundary.attempt   <span class="d">no pending work — claiming with a new session</span>
+<span class="d">12:10:34</span>  <span class="g">ping.ok</span>
+<span class="d">17:10:26</span>  boundary.attempt   <span class="d">no pending work — claiming with a new session</span>
+<span class="d">17:10:33</span>  <span class="g">ping.ok</span>
+<span class="d">17:48:05</span>  <span class="y">ledger.corrected</span>   <span class="d">believed the window ended 12:20Z,</span>
+                              <span class="d">evidence says 11:40Z</span></pre></div>
+    </div>
+    <p>That last line is the tool catching <em>itself</em> being wrong. What it believes about your window is re-derived from your own conversation history on every tick, so a mistaken belief lasts one tick instead of forever.</p>
+
+    <div class="facts" style="margin-top:.6rem">
+      <div class="fact"><b>367</b><span>tests</span></div>
+      <div class="fact"><b>64/64</b><span>mutations caught</span></div>
+      <div class="fact"><b>91/91</b><span>resets on the 10-min grid</span></div>
+      <div class="fact"><b>86/86</b><span>window predictions exact</span></div>
+    </div>
+  </section>
+
+  <hr class="rule" />
+
+  <!-- ============================ HONEST ============================ -->
+  <section>
+    <span class="eyebrow">Worth knowing</span>
+    <h2>What it will not do</h2>
+    <p>It does <strong>not</strong> reset, extend or bypass server-side limits — that's impossible, and nothing here attempts it. It waits for normal availability and then makes ordinary requests on your own account.</p>
+    <p>A sleeping machine claims nothing. If your laptop is suspended at 02:00, that boundary is claimed when you wake it, not at 02:00. Nothing in user space can fix that; if you want the countdown to survive the night, the machine has to stay awake.</p>
+    <p>And it never types over a message you've half-written. Every keystroke is forwarded, so it knows when your input box has a draft in it — appending to that and pressing Enter for you is the one way a tool like this could destroy work instead of saving it.</p>
+  </section>
+
+  <footer>
+    <span>github.com/gsspriceai/claudekishmish · MIT</span>
+    <span>Credits to Gantavya Singh Shekhawat</span>
+  </footer>
+
+</div>
+</body>
+</html>

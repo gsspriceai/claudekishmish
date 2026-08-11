@@ -24,6 +24,8 @@ the terminal, which looks identical to working.
 
 Then use `claude` exactly as you always have.
 
+Prefer it illustrated? [**docs/install-guide.html**](docs/install-guide.html) is the same three steps with the terminal output, the window model drawn out, and every command explained on one page. Open it in a browser, or print it.
+
 Windows, macOS and Linux — with one note about macOS below.
 
 [![CI](https://github.com/gsspriceai/claudekishmish/actions/workflows/ci.yml/badge.svg)](https://github.com/gsspriceai/claudekishmish/actions/workflows/ci.yml)
