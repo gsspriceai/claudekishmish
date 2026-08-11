@@ -8,7 +8,23 @@ npm i -g claudekishmish
 ckm setup
 ```
 
-Windows, macOS and Linux — with one caveat on macOS, below.
+`ckm setup` prints one thing left to do: put the shim on PATH. **Do it, and open
+a new terminal.** Until then only half the tool is running — boundaries are
+claimed, but nothing supervises your sessions, so nothing can continue your work.
+`ckm status` tells you which half you are in:
+
+```
+Install
+  shim           installed but NOT on PATH      <-- in-place continuation is OFF
+```
+
+On Windows make sure you use the persistent form `ckm setup` prints (it writes
+your user environment). The obvious `$env:Path = ...` line lasts until you close
+the terminal, which looks identical to working.
+
+Then use `claude` exactly as you always have.
+
+Windows, macOS and Linux — with one note about macOS below.
 
 [![CI](https://github.com/gsspriceai/claudekishmish/actions/workflows/ci.yml/badge.svg)](https://github.com/gsspriceai/claudekishmish/actions/workflows/ci.yml)
 
@@ -37,8 +53,8 @@ unclaimed.**
 
 ## Verified, not assumed
 
-The window model was derived from 90 real `rate_limit` records, then checked
-against 76,000+ transcript records:
+The window model was derived from 90 real `rate_limit` records, then re-checked
+against 84,000+ transcript records:
 
 ```
 windowStart = floor10(first message after the previous window expired)
@@ -46,14 +62,57 @@ windowEnd   = windowStart + 5h
 ```
 
 ```
-limits detected    : 90  {"session":85,"weekly":3,"model":2}
-session resets read: 85/85
-resets on 10m grid : 85/85
-window prediction  : 80/80 exact
+transcripts        : 94 files, 84143 records
+limits detected    : 96  {"session":91,"weekly":3,"model":2}
+session resets read: 91/91
+resets on 10m grid : 91/91
+window prediction  : 86/86 exact
 ```
 
 Every reset time Claude Code has ever stated on that machine landed on a
 10-minute grid — `{:00, :10, :20, :30, :40, :50}`, zero exceptions.
+
+### The window is read from history, not remembered
+
+Note the words *first message after the previous window expired*. A message sent
+**inside** a window that is already running starts nothing — it rides the window
+you already have.
+
+That distinction is the whole ballgame, and getting it wrong is silent. An
+earlier version advanced its ledger by its own claims and treated each one as
+opening a new window. The first time a claim landed mid-window — because a human
+had typed first and started the window twenty minutes earlier — the ledger
+described a window that did not exist, and could not recover: every later claim
+re-anchored on the last wrong one.
+
+Seen on a real machine on 2026-08-11:
+
+```
+truth   07:10 → 12:10     (anchored by the user's own 07:13 message)
+ledger  11:50 → 16:50     (anchored by this tool's own claim)
+```
+
+`ckm status` reported a healthy window 4h 44m away while the boundary it exists
+to catch went by unnoticed.
+
+So the ledger is now re-derived from the conversation history on **every tick**,
+and evidence outranks arithmetic:
+
+| Source | Rank | Why |
+|---|---|---|
+| A reset time the server stated | highest, until it expires | the server is the only party that actually knows |
+| Turns in your transcripts | beats anything inferred | a record of what happened |
+| Our own claim time | lowest | an assumption about what a claim did |
+
+Two guards keep that from becoming its own bug: history whose window has already
+ended is ignored (yesterday's transcript cannot resurrect an expired window), and
+a correction that moves the window earlier clears a claimed-boundary marker that
+would otherwise sit permanently out of reach.
+
+Re-reading every transcript ten times a minute would be absurd — 885 MB across
+94 files on that machine, 1.6 seconds a scan — so files are cached on size and
+mtime. Transcripts are append-only, so an unchanged file cannot have gained a
+turn, and a warm scan is one `stat` per file.
 
 Check the model against your own history, from a git checkout:
 
@@ -225,7 +284,11 @@ more than the features.
    the instant before anything is typed.
 8. **Nothing leaves your machine.** No credentials are read, stored or
    transmitted. No network calls except Claude Code's own.
-9. **Everything is logged** before it happens — `ckm logs`.
+9. **The ledger can be corrected.** What the tool believes about the current
+   window is re-derived from your conversation history every tick, so a wrong
+   belief lasts one tick rather than for ever, and a correction is logged
+   (`ledger.corrected`) with what it believed and what the evidence said.
+10. **Everything is logged** before it happens — `ckm logs`.
 
 ## What it is not
 
@@ -243,7 +306,7 @@ pipes, and therefore no per-platform IPC to get wrong.
 | Role | Job |
 |---|---|
 | `ckm wrap` | PTY host. Runs the real `claude` in a pseudo-terminal, passthrough in both directions, types the continuation when the window reopens. |
-| `ckm daemon` | Owns the window ledger. Claims boundaries when no terminal is open, and **defers** to the wrapper when the pending session belongs to it. |
+| `ckm daemon` | Owns the window ledger, reconciling it against transcript history every tick. Claims boundaries when no terminal is open, and **defers** to the wrapper when the pending session belongs to it. |
 | `ckm` | status, pause, resume, setup, doctor, logs, uninstall. |
 
 Detection uses the authoritative transcript record, never screen-scraping:
@@ -272,7 +335,8 @@ land in the degraded mode.
 ```bash
 npm install
 npm run build
-npm test          # 262 tests
+npm test              # 308 tests
+npm run mutation-check   # reintroduce each fixed defect; every one must go red
 ```
 
 Correctness lives in pure functions (`window/ledger.ts`, `window/claimer.ts`),
@@ -282,9 +346,15 @@ loop runs in seconds with no account and no network.
 
 The suite is mutation-checked: each fixed defect is reintroduced and the test
 written for it must go red. A test that still passes with the bug back in is not
-a test. Thirty-one mutations are checked this way, and several were added
-because an audit proved the original tests could not see them — most often
-because a guard had unit tests and its **call site** had none.
+a test. Forty-six mutations are checked this way, and several were added because
+an audit proved the original tests could not see them — most often because a
+guard had unit tests and its **call site** had none.
+
+The harness fails on a *skipped* mutation as loudly as on a surviving one. An
+anchor that no longer matches the code checks nothing, while still printing a
+reassuring line — an untested defect wearing a tested defect's name. Four of them
+rotted at once when a Windows checkout converted line endings, which is why
+matching is now done against LF whatever is on disk.
 
 ## Licence
 

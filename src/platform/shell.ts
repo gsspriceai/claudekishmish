@@ -30,11 +30,14 @@ import { cliEntryPath } from './service.js';
 export interface ShimPlan {
   dir: string;
   files: { path: string; contents: string; mode?: number }[];
-  /** The line the user must add to their shell profile. */
+  /** The one thing to run, or add to a profile, to put the shim on PATH. */
   pathLine: string;
-  /** Extra lines for shells whose syntax differs. */
+  /** Extra lines for shells whose syntax differs, or shorter-lived options. */
   alternatives: { shell: string; line: string }[];
+  /** Where `pathLine` goes, or how long it lasts. Shown next to it. */
   profileHint: string;
+  /** How to undo `pathLine`, for `ckm uninstall`. */
+  pathRemoval: string;
 }
 
 /**
@@ -135,12 +138,28 @@ export function planShim(): ShimPlan {
         // Git Bash / MSYS resolve a bare `claude`, never `claude.cmd`.
         { path: path.join(dir, 'claude'), contents: SH_SHIM, mode: 0o755 },
       ],
-      pathLine: `$env:Path = "${dir};" + $env:Path`,
+      // Persistent and shell-independent, on purpose.
+      //
+      // The obvious line — `$env:Path = "<dir>;" + $env:Path` — lasts until the
+      // terminal closes. Pasting it makes `ckm doctor` go green, `claude` gets
+      // supervised, and then the next terminal silently has no shim again: the
+      // whole in-place-continuation half of the tool is off and nothing says so.
+      // Observed on a real install, where it stayed off for days.
+      //
+      // `[Environment]::SetEnvironmentVariable(..., 'User')` writes the user
+      // environment, so every future process gets it — PowerShell, cmd, Git
+      // Bash, VS Code, a GUI-launched terminal. `setx` would do the same thing
+      // and truncate PATH at 1024 characters, which is how tools like this one
+      // become known for destroying people's PATH.
+      pathLine: `[Environment]::SetEnvironmentVariable('Path', '${dir};' + [Environment]::GetEnvironmentVariable('Path','User'), 'User')`,
       alternatives: [
-        { shell: 'cmd.exe', line: `set "PATH=${dir};%PATH%"` },
-        { shell: 'Git Bash', line: `export PATH="${toPosix(dir)}:$PATH"` },
+        { shell: 'this session only (PowerShell)', line: `$env:Path = "${dir};" + $env:Path` },
+        { shell: 'this session only (cmd.exe)', line: `set "PATH=${dir};%PATH%"` },
+        { shell: 'this session only (Git Bash)', line: `export PATH="${toPosix(dir)}:$PATH"` },
       ],
-      profileHint: 'your PowerShell $PROFILE',
+      profileHint: 'run it once, then open a new terminal — it persists for every shell',
+      pathRemoval:
+        `[Environment]::SetEnvironmentVariable('Path', (([Environment]::GetEnvironmentVariable('Path','User') -split ';') | Where-Object { $_ -ne '${dir}' }) -join ';', 'User')`,
     };
   }
 
@@ -149,7 +168,8 @@ export function planShim(): ShimPlan {
     files: [{ path: path.join(dir, 'claude'), contents: SH_SHIM, mode: 0o755 }],
     pathLine: `export PATH="${dir}:$PATH"`,
     alternatives: [{ shell: 'fish', line: `fish_add_path ${dir}` }],
-    profileHint: os.platform() === 'darwin' ? '~/.zshrc' : '~/.bashrc or ~/.zshrc',
+    profileHint: os.platform() === 'darwin' ? 'add it to ~/.zshrc' : 'add it to ~/.bashrc or ~/.zshrc',
+    pathRemoval: `remove this line from your shell profile: export PATH="${dir}:$PATH"`,
   };
 }
 

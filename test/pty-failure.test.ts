@@ -17,14 +17,15 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { spawnPty, type PtySession } from '../src/pty/host.js';
+import { rmWhenReleased } from './helpers/rm.js';
 
 let session: PtySession | null = null;
 let dir: string | null = null;
 
-afterEach(() => {
+afterEach(async () => {
   session?.kill();
   session = null;
-  if (dir) fs.rmSync(dir, { recursive: true, force: true });
+  if (dir) await rmWhenReleased(dir);
   dir = null;
 });
 

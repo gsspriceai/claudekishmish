@@ -15,6 +15,7 @@
 
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import fs from 'node:fs';
+import { rmWhenReleased } from './helpers/rm.js';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -56,12 +57,14 @@ beforeEach(() => {
   process.env.CKM_CLAUDE_BIN = fakeBin;
 });
 
-afterEach(() => {
+afterEach(async () => {
   for (const k of ['CKM_HOME', 'CLAUDE_CONFIG_DIR', 'FAKE_ARGS_FILE', 'CKM_CLAUDE_BIN']) {
     delete process.env[k];
   }
-  fs.rmSync(ckmHome, { recursive: true, force: true });
-  fs.rmSync(claudeHome, { recursive: true, force: true });
+  // A claim spawns a real child process; on Windows its temp directory cannot
+  // be removed until it has actually gone. See `helpers/rm.ts`.
+  await rmWhenReleased(ckmHome);
+  await rmWhenReleased(claudeHome);
 });
 
 /** A window that has just expired, with nobody around. */

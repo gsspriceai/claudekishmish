@@ -4,7 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { mutateState, readState } from '../src/state/store.js';
+import { acquireLock, isLockContention, mutateState, readState } from '../src/state/store.js';
 
 const run = promisify(execFile);
 
@@ -139,5 +139,76 @@ describe('state store', () => {
     expect(Object.keys(final.sessions).sort()).toEqual(
       Array.from({ length: writers }, (_, i) => `s${i}`).sort(),
     );
+  });
+});
+
+/**
+ * What counts as "the lock is held".
+ *
+ * On Windows a delete-pending file — unlinked by another process while a handle
+ * is still open — reports EPERM or EACCES rather than EEXIST. Same situation,
+ * different name; treating it as fatal threw the caller out of its tick under
+ * nothing worse than two writers meeting.
+ *
+ * Found by CI on `windows-latest / node 22`, not by review. The delete-pending
+ * window is a few milliseconds wide and cannot be opened deterministically from
+ * a test, so the rule is tested directly rather than pantomimed — and a mutation
+ * proves the rule is what the lock actually consults.
+ */
+describe('isLockContention', () => {
+  it('treats the Windows delete-pending codes as contention, not failure', () => {
+    for (const code of ['EEXIST', 'EPERM', 'EACCES']) {
+      expect(isLockContention(code), code).toBe(true);
+    }
+  });
+
+  it('still lets a genuine error through', () => {
+    // A missing directory or a bad path is not something waiting can fix, and
+    // silently retrying it for the whole lock timeout would hide the cause.
+    for (const code of ['ENOENT', 'ENOTDIR', 'EROFS', 'EMFILE', undefined]) {
+      expect(isLockContention(code), String(code)).toBe(false);
+    }
+  });
+});
+
+/**
+ * The retry path, at its call site.
+ *
+ * The rule above says EPERM is contention; this proves the lock consults it.
+ * A version that checked `code !== 'EEXIST'` inline passed every test of the
+ * rule while behaving exactly as it did before the fix — the same
+ * guard-with-no-caller shape that has now bitten this codebase ten times.
+ */
+describe('the lock retries a Windows delete-pending open', () => {
+  it('waits and succeeds instead of throwing', async () => {
+    let attempts = 0;
+    const held = await acquireLock(async () => {
+      attempts++;
+      if (attempts <= 2) {
+        // Exactly what Windows reports for a lock another process has unlinked
+        // while a handle is still open.
+        throw Object.assign(new Error('EPERM: operation not permitted, open'), { code: 'EPERM' });
+      }
+      return {
+        async writeFile() {},
+        async close() {},
+      };
+    });
+
+    expect(attempts).toBe(3);
+    clearInterval(held.heartbeat);
+  });
+
+  it('gives up immediately on an error waiting cannot fix', async () => {
+    let attempts = 0;
+    await expect(
+      acquireLock(async () => {
+        attempts++;
+        throw Object.assign(new Error('ENOTDIR: not a directory'), { code: 'ENOTDIR' });
+      }),
+    ).rejects.toThrow(/ENOTDIR/);
+
+    // One attempt, not a ten-second spin that buries the real cause.
+    expect(attempts).toBe(1);
   });
 });

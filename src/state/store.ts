@@ -29,6 +29,27 @@ const LOCK_HEARTBEAT_MS = 3_000;
 const LOCK_RETRY_MS = 20;
 const LOCK_TIMEOUT_MS = 10_000;
 
+/**
+ * Does this error code mean "someone else holds the lock"?
+ *
+ * EEXIST is the honest answer, and the only one POSIX gives. Windows also
+ * reports EPERM or EACCES for a file that is *delete-pending*: another process
+ * has unlinked the lock but a handle is still open, so the name still exists
+ * and cannot be opened. That is the same situation — wait and try again — but
+ * treating it as fatal threw the caller out of its tick under nothing worse
+ * than ordinary contention.
+ *
+ * Caught by CI on `windows-latest / node 22`, not by review: two writers raced
+ * for the lock and one got EPERM.
+ *
+ * Misreading a genuinely permanent EPERM (a read-only directory) as contention
+ * costs the lock timeout and then fails with a clear message, which is a far
+ * better trade than aborting a tick every time two writers meet.
+ */
+export function isLockContention(code: string | undefined): boolean {
+  return code === 'EEXIST' || code === 'EPERM' || code === 'EACCES';
+}
+
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 /** A held lock, with the heartbeat that keeps it from looking stale. */
@@ -45,13 +66,24 @@ async function lockIsStale(): Promise<boolean> {
   }
 }
 
-async function acquireLock(): Promise<HeldLock> {
+/**
+ * Exclusive-create the lock file. Injected so a test can drive the retry path.
+ *
+ * The Windows delete-pending window is a few milliseconds wide and cannot be
+ * opened on demand, so the only honest way to prove the retry works is to make
+ * the open fail the way Windows makes it fail.
+ */
+export type LockOpener = () => Promise<{ writeFile(data: string): Promise<void>; close(): Promise<void> }>;
+
+const openLockExclusive: LockOpener = () => fsp.open(stateLockPath(), 'wx');
+
+export async function acquireLock(open: LockOpener = openLockExclusive): Promise<HeldLock> {
   await fsp.mkdir(ckmHome(), { recursive: true });
   const deadline = Date.now() + LOCK_TIMEOUT_MS;
 
   for (;;) {
     try {
-      const handle = await fsp.open(stateLockPath(), 'wx');
+      const handle = await open();
       await handle.writeFile(String(process.pid));
       await handle.close();
 
@@ -71,7 +103,8 @@ async function acquireLock(): Promise<HeldLock> {
       return { heartbeat };
     } catch (err) {
       const code = (err as NodeJS.ErrnoException).code;
-      if (code !== 'EEXIST') throw err;
+
+      if (!isLockContention(code)) throw err;
 
       if (await lockIsStale()) {
         try {

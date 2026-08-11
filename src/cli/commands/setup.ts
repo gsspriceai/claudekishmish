@@ -64,9 +64,10 @@ export function runSetup(opts: { noClaim?: boolean } = {}): number {
   out.push('  Two steps left — run these yourself:');
   out.push('');
   if (!shimTakesPrecedence()) {
-    out.push(`  1. Put the shim FIRST on PATH. Add to ${shim.profileHint}:`);
+    out.push(`  1. Put the shim FIRST on PATH — ${shim.profileHint}:`);
     out.push('');
     out.push(`         ${shim.pathLine}`);
+    out.push('');
     for (const alt of shim.alternatives) {
       out.push(`     ${alt.shell}:`);
       out.push(`         ${alt.line}`);
@@ -121,8 +122,8 @@ export function runUninstall(): number {
   out.push(unit ? `  Removed service     ${unit}` : '  Service unit        already absent');
   out.push('');
   out.push('  Still to do by hand:');
-  out.push(`    - remove this line from ${plan.profileHint}:`);
-  out.push(`          ${plan.pathLine}`);
+  out.push('    - take the shim back off PATH:');
+  out.push(`          ${plan.pathRemoval}`);
   if (process.platform === 'linux') {
     out.push('    - systemctl --user disable --now claudekishmish.service');
   }

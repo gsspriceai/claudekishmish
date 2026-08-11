@@ -32,6 +32,17 @@ authority — see `README.md`. The notable reversals:
 - **Codex support (never shipped)** — dropped after measurement. Codex's window
   slides: `resets_at` is recomputed as `now + window` on every message, so there
   is no fixed boundary to claim and nothing for this tool to do.
+- **The ledger advancing by its own claims (§4)** — reversed after a live
+  failure. Every claim was assumed to open a new window, which is only true when
+  the claim is the first message after the previous window expired. A claim
+  landing mid-window described a window that did not exist, and each later claim
+  re-anchored on the last wrong one. The ledger is now re-derived from transcript
+  history every tick; §2's model was right, it was simply applied to an
+  assumption instead of to evidence.
+- **"the ledger never walks backwards"** — kept for stale reads, dropped for
+  corrections. An observation whose window contains *now* is a statement about
+  the present and outranks anything inferred, even when it moves the end
+  earlier; one whose window has already ended is still ignored.
 
 What has held up, and is worth reading for: the derivation of the window model
 in §2 from 90 real `rate_limit` records, and the reasoning in §2.3 about why

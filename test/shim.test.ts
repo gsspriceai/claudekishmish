@@ -214,3 +214,57 @@ describe('supervision depth', () => {
     expect(MAX_SUPERVISION_DEPTH).toBeGreaterThan(0);
   });
 });
+
+/**
+ * The PATH instruction has to outlive the terminal it is pasted into.
+ *
+ * On a real Windows install the shim was written, the printed line was pasted,
+ * `ckm doctor` went green — and every terminal opened afterwards had no shim.
+ * In-place continuation, one of this tool's two jobs, was off for days with
+ * nothing reporting it, because the instruction set the variable for one shell
+ * only.
+ */
+describe('the PATH instruction persists', () => {
+  it('recommends a change that survives closing the terminal', async () => {
+    const { planShim } = await import('../src/platform/shell.js');
+    const plan = planShim();
+
+    if (process.platform === 'win32') {
+      // The user environment, which every future process inherits.
+      expect(plan.pathLine).toContain('SetEnvironmentVariable');
+      expect(plan.pathLine).toContain("'User'");
+      // Not the one-shell form, and not the PATH-truncating one.
+      expect(plan.pathLine).not.toMatch(/^\$env:Path\s*=/);
+      expect(plan.pathLine).not.toContain('setx');
+    } else {
+      // A profile line is read by every new shell, so it already persists.
+      expect(plan.pathLine).toContain('export PATH=');
+      expect(plan.profileHint).toMatch(/rc$|rc\b/);
+    }
+  });
+
+  it('still offers a session-only option, labelled as such', async () => {
+    const { planShim } = await import('../src/platform/shell.js');
+    const plan = planShim();
+    if (process.platform !== 'win32') return;
+
+    const temporary = plan.alternatives.filter((a) => /session only/i.test(a.shell));
+    expect(temporary.length).toBeGreaterThan(0);
+    // Covering the three shells a Windows user might be sitting in.
+    expect(temporary.map((a) => a.shell).join(' ')).toMatch(/PowerShell/);
+    expect(temporary.map((a) => a.shell).join(' ')).toMatch(/cmd\.exe/);
+    expect(temporary.map((a) => a.shell).join(' ')).toMatch(/Git Bash/);
+  });
+
+  it('can be undone, and the undo does not wipe the rest of PATH', async () => {
+    const { planShim } = await import('../src/platform/shell.js');
+    const plan = planShim();
+
+    expect(plan.pathRemoval).toContain(plan.dir);
+    if (process.platform === 'win32') {
+      // Filters this one entry out rather than assigning a new PATH wholesale.
+      expect(plan.pathRemoval).toContain('Where-Object');
+      expect(plan.pathRemoval).toContain('-join');
+    }
+  });
+});
