@@ -32,6 +32,8 @@ import {
   WINDOW_MS,
 } from '../window/ledger.js';
 import { sendPingWithRetry } from '../window/ping.js';
+import { reconcileLedger } from '../window/reconcile.js';
+import { cachedUserTurnTimes, lastScanStats } from '../claude/turn-cache.js';
 import {
   allUserTurnTimes,
   findTranscript,
@@ -228,10 +230,26 @@ export async function tick(ctx: TickContext): Promise<ClaimDecision> {
   const now = Date.now();
   const observations = observe(readState(), ctx.actor.ownSessionId);
 
+  // Read in the observe phase, outside the lock: this is file I/O, and the
+  // cache makes it a stat-per-file once warm. See `turn-cache.ts` for why it is
+  // affordable to do on every tick, and `reconcile.ts` for why it must be.
+  const turns = cachedUserTurnTimes();
+
   const decision = await updateState((state) => {
     // An impossible ledger (a claim at or after the window it opened) would
     // otherwise make every boundary unreachable for ever.
     let next: State = { ...state, ledger: repairLedger(state.ledger) };
+
+    // Evidence before assumption. Our own claims are guesses about when a
+    // window started; the conversation history is a record of it. Done before
+    // anything reads the ledger, so every decision below sees the corrected
+    // window rather than acting on one we invented.
+    const reconciled = reconcileLedger(next.ledger, turns, now);
+    if (reconciled.corrected) {
+      logWarn('ledger.corrected', { reason: reconciled.reason, scan: lastScanStats() });
+      next = { ...next, ledger: reconciled.ledger };
+    }
+
     next = applyLiveness(next, observations);
 
     for (const obs of observations) {

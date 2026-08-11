@@ -16,10 +16,11 @@ import os from 'node:os';
 import path from 'node:path';
 import { DEFAULT_CONFIG, type Config } from '../src/config/index.js';
 import { emptyState, type SupervisedSession } from '../src/state/schema.js';
-import { WINDOW_MS } from '../src/window/ledger.js';
+import { computeWindow, WINDOW_MS } from '../src/window/ledger.js';
 import { applyLiveness, stillEligible, tick } from '../src/supervisor/index.js';
 import { mutateState, readState } from '../src/state/store.js';
 import { pingArgs } from '../src/window/ping.js';
+import { clearTurnCache } from '../src/claude/turn-cache.js';
 import { fileURLToPath } from 'node:url';
 
 const SESSION_ID = 'cccccccc-dddd-eeee-ffff-000000000000';
@@ -281,5 +282,82 @@ describe('the claim runs nowhere near a project', () => {
     const args = pingArgs('ok');
     expect(args).toContain('--strict-mcp-config');
     expect(args).toContain('--disable-slash-commands');
+  });
+});
+
+/**
+ * The reconciler, at its call site.
+ *
+ * `reconcile.test.ts` proves the rule. This proves `tick` applies it — the
+ * distinction that mattered nine separate times in this codebase, where a guard
+ * existed, had unit tests, and was wired to nothing.
+ */
+describe('the ledger is reconciled against history on every tick', () => {
+  /** A transcript carrying one user turn, in the shape Claude Code writes. */
+  function writeTurn(at: number): void {
+    const dir = path.join(claudeHome, 'projects', 'some-project');
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(
+      path.join(dir, `${SESSION_ID}.jsonl`),
+      JSON.stringify({
+        type: 'user',
+        timestamp: new Date(at).toISOString(),
+        message: { role: 'user', content: 'hello' },
+      }) + '\n',
+      'utf8',
+    );
+  }
+
+  it('corrects a window the tool invented, and does not act on the invented one', async () => {
+    clearTurnCache();
+    const now = Date.now();
+    // The user started the real window an hour ago. It has four hours to run.
+    const humanTurn = now - 60 * 60_000;
+    const truth = computeWindow(humanTurn);
+    writeTurn(humanTurn);
+
+    // What the tool believed: a window of its own, ending later than the truth.
+    await mutateState(() => ({
+      ...emptyState(now),
+      ledger: {
+        currentStart: truth.end,
+        currentEnd: truth.end + 4 * 60 * 60_000,
+        lastClaimedBoundary: null,
+        reservation: null,
+        source: 'claim',
+      },
+    }));
+
+    await tick({ actor: { id: 'd', ownSessionId: null }, resume: async () => false, config });
+
+    const after = readState().ledger;
+    expect(after.currentEnd).toBe(truth.end);
+    expect(after.currentStart).toBe(truth.start);
+    expect(after.source).toBe('computed');
+  });
+
+  it('leaves a ledger alone when history agrees with it', async () => {
+    clearTurnCache();
+    const now = Date.now();
+    const humanTurn = now - 60 * 60_000;
+    const truth = computeWindow(humanTurn);
+    writeTurn(humanTurn);
+
+    await mutateState(() => ({
+      ...emptyState(now),
+      ledger: {
+        currentStart: truth.start,
+        currentEnd: truth.end,
+        lastClaimedBoundary: null,
+        reservation: null,
+        source: 'computed',
+      },
+    }));
+
+    await tick({ actor: { id: 'd', ownSessionId: null }, resume: async () => false, config });
+
+    const after = readState().ledger;
+    expect(after.currentEnd).toBe(truth.end);
+    expect(after.source).toBe('computed');
   });
 });

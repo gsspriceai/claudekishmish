@@ -298,6 +298,57 @@ const MUTATIONS = [
     expect: 'test/config.test.ts test/inject.test.ts',
   },
   {
+    name: 'the ledger is never reconciled against history (the 2026-08-11 bug)',
+    file: 'src/supervisor/index.ts',
+    find: '      next = { ...next, ledger: reconciled.ledger };',
+    replace: '',
+    expect: 'test/wiring.test.ts',
+  },
+  {
+    name: 'reconciliation refuses to move the window EARLIER',
+    file: 'src/window/reconcile.ts',
+    find: '  if (derived.end <= now) return unchanged;',
+    replace:
+      '  if (derived.end <= now) return unchanged;' +
+      ' if (ledger.currentEnd !== null && derived.end <= ledger.currentEnd) return unchanged;',
+    expect: 'test/reconcile.test.ts',
+  },
+  {
+    name: 'stale history resurrects an expired window',
+    file: 'src/window/reconcile.ts',
+    find: '  if (derived.end <= now) return unchanged;',
+    replace: '',
+    expect: 'test/reconcile.test.ts',
+  },
+  {
+    name: 'a corrected window keeps a claim it can never reach again',
+    file: 'src/window/reconcile.ts',
+    find: '    ledger.lastClaimedBoundary !== null && ledger.lastClaimedBoundary >= derived.end',
+    replace: '    false',
+    expect: 'test/reconcile.test.ts',
+  },
+  {
+    name: 'inference overrules a live server-stated reset',
+    file: 'src/window/reconcile.ts',
+    find: "  if (ledger.source === 'reset-message' && ledger.currentEnd !== null && now < ledger.currentEnd) {",
+    replace: '  if (false) {',
+    expect: 'test/reconcile.test.ts',
+  },
+  {
+    name: 'the turn cache never notices a file changed (window stops advancing)',
+    file: 'src/claude/turn-cache.ts',
+    find: '    if (hit && hit.mtimeMs === stat.mtimeMs && hit.size === stat.size) {',
+    replace: '    if (hit) {',
+    expect: 'test/turn-cache.test.ts',
+  },
+  {
+    name: 'the turn cache holds on to deleted transcripts',
+    file: 'src/claude/turn-cache.ts',
+    find: '    if (!seen.has(known)) cache.delete(known);',
+    replace: '',
+    expect: 'test/turn-cache.test.ts',
+  },
+  {
     name: 'a 24-hour reset string is unparseable (continuation never fires)',
     file: 'src/claude/resetparse.ts',
     find: `  if (!m) return parse24HourReset(text, now);`,
@@ -309,7 +360,19 @@ const MUTATIONS = [
 let survived = 0;
 let skipped = 0;
 for (const m of MUTATIONS) {
-  const original = fs.readFileSync(m.file, 'utf8');
+  const onDisk = fs.readFileSync(m.file, 'utf8');
+
+  // Match against LF regardless of what is on disk.
+  //
+  // Git converts line endings on checkout, so on a Windows working copy every
+  // multi-line anchor here fails to match a file that is byte-for-byte correct.
+  // Four of them rotted at once that way — and a rotted anchor is an untested
+  // defect wearing a tested defect's name, which is the failure this script
+  // exists to catch. The file is restored in its original form either way.
+  const crlf = onDisk.includes('\r\n');
+  const original = crlf ? onDisk.replace(/\r\n/g, '\n') : onDisk;
+  const toDisk = (text) => (crlf ? text.replace(/\n/g, '\r\n') : text);
+
   if (!original.includes(m.find)) {
     // A skip is a failure, not a note. An anchor rots the moment the code it
     // points at is reformatted, and a silently-skipped mutation is an untested
@@ -319,7 +382,7 @@ for (const m of MUTATIONS) {
     skipped++;
     continue;
   }
-  fs.writeFileSync(m.file, original.replace(m.find, m.replace), 'utf8');
+  fs.writeFileSync(m.file, toDisk(original.replace(m.find, m.replace)), 'utf8');
 
   let red = false;
   try {
@@ -328,7 +391,7 @@ for (const m of MUTATIONS) {
   } catch {
     red = true;
   } finally {
-    fs.writeFileSync(m.file, original, 'utf8');
+    fs.writeFileSync(m.file, onDisk, 'utf8');
   }
 
   console.log(`${red ? 'CAUGHT' : 'SURVIVED'}  ${m.name}  ->  ${m.expect}`);

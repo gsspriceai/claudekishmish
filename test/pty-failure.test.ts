@@ -21,12 +21,35 @@ import { spawnPty, type PtySession } from '../src/pty/host.js';
 let session: PtySession | null = null;
 let dir: string | null = null;
 
-afterEach(() => {
+afterEach(async () => {
   session?.kill();
   session = null;
-  if (dir) fs.rmSync(dir, { recursive: true, force: true });
+  if (dir) await removeWhenReleased(dir);
   dir = null;
 });
+
+/**
+ * Remove a directory a child process was using.
+ *
+ * `kill()` returns as soon as the signal is delivered, not when the process has
+ * gone. On Windows a directory cannot be removed while any process still has it
+ * open as a working directory, so a prompt `rmSync` fails with EBUSY — an
+ * intermittent red suite caused entirely by teardown, which is worse than no
+ * cleanup at all because it teaches you to distrust the run.
+ *
+ * A few short retries, and then give up quietly: this is a directory under the
+ * OS temp root, which the OS itself will reclaim.
+ */
+async function removeWhenReleased(target: string): Promise<void> {
+  for (let attempt = 0; attempt < 20; attempt++) {
+    try {
+      fs.rmSync(target, { recursive: true, force: true });
+      return;
+    } catch {
+      await new Promise((r) => setTimeout(r, 50));
+    }
+  }
+}
 
 /** A module that loads fine and refuses to spawn — macOS, exactly. */
 const throwsOnSpawn = {
