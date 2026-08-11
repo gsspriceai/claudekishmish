@@ -123,7 +123,16 @@ export function latestOutageEvent(
   now = new Date(),
 ): OutageEvent | null {
   for (let i = records.length - 1; i >= 0; i--) {
-    const event = toOutageEvent(records[i]!, now, backoffMs);
+    const record = records[i]!;
+
+    // Anything that is not itself an API error means work carried on after the
+    // failure — Claude Code retried internally and succeeded, or the user
+    // stepped in. Either way the session is not stopped, and typing into it
+    // would land mid-output. Only a user turn ends an episode already recorded
+    // (`absorbUserRecovery`); this stops one being opened in the first place.
+    if (record.isApiErrorMessage !== true) return null;
+
+    const event = toOutageEvent(record, now, backoffMs);
     if (event) return event;
   }
   return null;

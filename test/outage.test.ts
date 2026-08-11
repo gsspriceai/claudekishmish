@@ -167,3 +167,47 @@ describe('nextRetryAt', () => {
     expect(nextRetryAt(1_000, -5, 30_000, 8 * 60_000)).toBe(31_000);
   });
 });
+
+/**
+ * An error that work carried on past is not a stopped session.
+ *
+ * Claude Code retries some failures internally. If it logs the error and then
+ * succeeds, the transcript holds an API-error record with ordinary records
+ * after it — and a scanner that only looks for the newest error would arm a
+ * continuation for a session that never stopped, typing into it mid-output.
+ */
+describe('latestOutageEvent', () => {
+  const overloaded = {
+    type: 'assistant',
+    error: 'unknown',
+    apiErrorStatus: 529,
+    isApiErrorMessage: true,
+    timestamp: '2026-08-11T09:00:00.000Z',
+    message: { content: [{ type: 'text', text: 'API Error: Overloaded' }] },
+  };
+
+  it('finds an outage that is the last thing in the transcript', async () => {
+    const { latestOutageEvent } = await import('../src/claude/transcript.js');
+    expect(latestOutageEvent([{ type: 'user', timestamp: '2026-08-11T08:59:00.000Z' }, overloaded], 30_000, NOW)).not.toBeNull();
+  });
+
+  it('finds nothing when the assistant carried on afterwards', async () => {
+    const { latestOutageEvent } = await import('../src/claude/transcript.js');
+    const after = { type: 'assistant', timestamp: '2026-08-11T09:00:30.000Z', message: { content: [{ type: 'text', text: 'here is the answer' }] } };
+    expect(latestOutageEvent([overloaded, after], 30_000, NOW)).toBeNull();
+  });
+
+  it('finds nothing when the user carried on afterwards', async () => {
+    const { latestOutageEvent } = await import('../src/claude/transcript.js');
+    const after = { type: 'user', timestamp: '2026-08-11T09:00:30.000Z', message: { content: [{ type: 'text', text: 'continue' }] } };
+    expect(latestOutageEvent([overloaded, after], 30_000, NOW)).toBeNull();
+  });
+
+  it('still finds the newest of several consecutive errors', async () => {
+    // A run of failures with nothing in between is one outage, still stopped.
+    const { latestOutageEvent } = await import('../src/claude/transcript.js');
+    const later = { ...overloaded, timestamp: '2026-08-11T09:05:00.000Z' };
+    const found = latestOutageEvent([overloaded, later], 30_000, NOW);
+    expect(found!.detectedAt).toBe(Date.parse('2026-08-11T09:05:00.000Z'));
+  });
+});

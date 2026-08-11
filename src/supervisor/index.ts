@@ -66,7 +66,7 @@ interface SessionObservation {
 }
 
 /** Phase 1: everything that touches the filesystem. */
-function observe(state: State, ownSessionId: string | null): SessionObservation[] {
+function observe(state: State, ownSessionId: string | null, config: Config): SessionObservation[] {
   const ids = ownSessionId ? [ownSessionId] : Object.keys(state.sessions);
   const out: SessionObservation[] = [];
 
@@ -92,7 +92,7 @@ function observe(state: State, ownSessionId: string | null): SessionObservation[
       sessionId: id,
       turns: userTurnTimes(records),
       limit: latestLimitEvent(records),
-      outage: latestOutageEvent(records, loadConfig().outageBackoffMs),
+      outage: latestOutageEvent(records, config.outageBackoffMs),
       liveness,
       status,
     });
@@ -133,8 +133,13 @@ export function absorbOutage(
   // reads `.detectedAt` off nothing — every tick after an upgrade would throw,
   // on exactly the machines that already had work in flight.
   const existing = session.outage ?? null;
-  const sameEpisode = existing !== null && event.detectedAt >= existing.detectedAt;
   if (existing && event.detectedAt === existing.detectedAt) return state;
+  // An older record than the one we hold is not news. Adopting it would reset
+  // the attempt count and set a `retryAt` already in the past — the exact loop
+  // the count exists to bound.
+  if (existing && event.detectedAt < existing.detectedAt) return state;
+
+  const sameEpisode = existing !== null;
 
   const attempts = sameEpisode ? existing.attempts : 0;
   const outage: OutageEvent = {
@@ -233,9 +238,16 @@ export function absorbUserRecovery(state: State, sessionId: string, turns: numbe
       [sessionId]: {
         ...session,
         pendingResume: false,
-        // The episode is over, so the next outage starts its count from zero.
-        // Left in place, a single bad afternoon would exhaust the cap for the
-        // rest of the session's life.
+        // Both causes are cleared, because both describe a stop that is over.
+        //
+        // `limit` used to be left behind for ever, and a stale one shadowed
+        // every later outage: `sessionResumable` took the limit branch, found a
+        // reset that had passed hours ago, and declared the session eligible
+        // immediately — backoff skipped, retry cap skipped, and the attempt
+        // counter frozen because its bookkeeping requires no limit. That is a
+        // retry loop at tick rate, which is the one outcome this feature must
+        // never produce.
+        limit: null,
         outage: null,
         updatedAt: Date.now(),
       },
@@ -307,7 +319,9 @@ export interface TickContext {
 /** One supervision tick. Returns the decision taken, for logging and tests. */
 export async function tick(ctx: TickContext): Promise<ClaimDecision> {
   const now = Date.now();
-  const observations = observe(readState(), ctx.actor.ownSessionId);
+  // `ctx.config`, not a fresh read: the observe and decide halves of one tick
+  // must not disagree because the file changed between them.
+  const observations = observe(readState(), ctx.actor.ownSessionId, ctx.config);
 
   // Read in the observe phase, outside the lock: this is file I/O, and the
   // cache makes it a stat-per-file once warm. See `turn-cache.ts` for why it is
@@ -334,7 +348,7 @@ export async function tick(ctx: TickContext): Promise<ClaimDecision> {
     for (const obs of observations) {
       if (!next.sessions[obs.sessionId]) continue;
       next = absorbTurns(next, obs.turns, now);
-      next = absorbUserRecovery(next, obs.sessionId, obs.turns);
+
       if (obs.limit) {
         const existing = next.sessions[obs.sessionId]?.limit;
         if (!existing || existing.detectedAt !== obs.limit.detectedAt) {
@@ -347,6 +361,16 @@ export async function tick(ctx: TickContext): Promise<ClaimDecision> {
       if (obs.outage) {
         next = absorbOutage(next, obs.sessionId, obs.outage, ctx.config, now);
       }
+
+      // Recovery is judged LAST, against what this batch just recorded.
+      //
+      // It used to run first, and then a poll containing both the failure and
+      // the user's own rescue armed the episode anyway: recovery saw nothing
+      // pending, did nothing, and the proving turn was consumed with the batch.
+      // Thirty seconds later the tool typed into a session that was already
+      // working. The same ordering resurrects a long-finished episode whenever
+      // a restarted daemon re-reads a transcript from the beginning.
+      next = absorbUserRecovery(next, obs.sessionId, obs.turns);
     }
 
     const d = decideClaim(next, ctx.config, now, ctx.actor);
@@ -397,6 +421,9 @@ export async function tick(ctx: TickContext): Promise<ClaimDecision> {
             ...session,
             pendingResume: ok ? false : session.pendingResume,
             resumeCount: session.resumeCount + (ok ? 1 : 0),
+            // Acted on, therefore spent. Kept, it would shadow every later
+            // outage on this session — see `absorbUserRecovery`.
+            limit: ok ? null : session.limit,
             // An outage retry is a guess, and the guess has now been spent.
             // Counted here rather than on detection, because a continuation we
             // declined to send (a draft in the box, a pause) must not consume

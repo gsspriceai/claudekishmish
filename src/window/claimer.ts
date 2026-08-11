@@ -20,7 +20,7 @@
  */
 
 import type { Config } from '../config/index.js';
-import type { State, SupervisedSession } from '../state/schema.js';
+import type { LimitEvent, State, SupervisedSession } from '../state/schema.js';
 import { isBoundaryDue, nextBoundary, reservedByOther } from './ledger.js';
 
 export type ClaimDecision =
@@ -62,35 +62,47 @@ export function sessionResumable(
   // below applies to both, and the injection path is shared. What differs is
   // only what we are waiting for — a stated reset, or a backoff we chose.
   //
-  // A limit outranks an outage. Retrying during a limit cannot succeed, and the
-  // limit knows exactly how long to wait, so if both are recorded the limit is
-  // what gets waited out.
-  if (!session.limit) {
-    return session.outage
-      ? outageResumable(session, config, now)
-      : { ok: false, reason: 'no recorded limit' };
+  // Which cause governs is decided here, and "whichever field is set" is not
+  // good enough. A limit that has already reset no longer blocks anything, and
+  // a stale one used to win outright: the limit branch found a reset from hours
+  // ago, declared the session eligible at once, and skipped the outage's
+  // backoff and retry cap — while the attempt counter stayed frozen, because
+  // its bookkeeping runs only when there is no limit. A retry loop at tick
+  // rate, from a field nobody had cleared.
+  //
+  // So: a limit that has not yet reset outranks everything, because retrying
+  // during it cannot succeed and it states exactly how long to wait. Otherwise
+  // the most recent cause governs.
+  const outage = session.outage ?? null;
+  const limit = session.limit ?? null;
+
+  if (!limit) {
+    return outage ? outageResumable(session, config, now) : { ok: false, reason: 'no recorded limit' };
+  }
+  if (outage && limitHasPassed(limit, config, now) && outage.detectedAt >= limit.detectedAt) {
+    return outageResumable(session, config, now);
   }
 
-  if (session.limit.kind === 'model') {
+  if (limit.kind === 'model') {
     return { ok: false, reason: 'model limit is out of scope — waiting cannot clear it' };
   }
-  if (session.limit.kind === 'weekly') {
+  if (limit.kind === 'weekly') {
     return { ok: false, reason: 'weekly limits are not auto-continued' };
   }
 
   // The limit must belong to *this* supervision run. A transcript is reused
   // across resumes, so an old record would otherwise make us type into a
   // terminal the user has only just opened.
-  if (session.limit.detectedAt < session.supervisedFrom) {
+  if (limit.detectedAt < session.supervisedFrom) {
     return { ok: false, reason: 'limit predates this session — historical, not live' };
   }
   // And the reset itself must actually have arrived.
-  if (session.limit.resetAt === null) {
+  if (limit.resetAt === null) {
     return { ok: false, reason: 'no reset time could be read' };
   }
   // The same buffer the boundary uses: a request a second after the stated
   // reset can still be refused, and we would be retrying blind.
-  if (now < session.limit.resetAt + Math.max(0, config.boundaryBufferMs)) {
+  if (now < limit.resetAt + Math.max(0, config.boundaryBufferMs)) {
     return { ok: false, reason: 'the stated reset has not passed yet' };
   }
 
@@ -101,6 +113,18 @@ export function sessionResumable(
     };
   }
   return { ok: true, reason: 'eligible' };
+}
+
+/**
+ * Has this limit's own stated reset already gone by?
+ *
+ * A limit past its reset is a record of something that happened, not a thing
+ * still blocking work.
+ */
+function limitHasPassed(limit: LimitEvent, config: Config, now: number): boolean {
+  if (limit.kind === 'model' || limit.kind === 'weekly') return false;
+  if (limit.resetAt === null) return false;
+  return now >= limit.resetAt + Math.max(0, config.boundaryBufferMs);
 }
 
 /**

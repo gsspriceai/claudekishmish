@@ -11,7 +11,7 @@
 
 import { describe, expect, it } from 'vitest';
 import { absorbOutage, absorbUserRecovery } from '../src/supervisor/index.js';
-import { outageResumable } from '../src/window/claimer.js';
+import { outageResumable, sessionResumable as sessionResumableSync } from '../src/window/claimer.js';
 import { DEFAULT_CONFIG, type Config } from '../src/config/index.js';
 import { emptyState, type State, type SupervisedSession } from '../src/state/schema.js';
 import type { OutageEvent } from '../src/claude/outage.js';
@@ -218,5 +218,70 @@ describe('a session record from an older build', () => {
       sessions: { [ID]: { ...legacy(), pendingResume: true, limit: { kind: 'session', detectedAt: T, resetAt: T, raw: 'x' } } },
     };
     expect(absorbUserRecovery(before, ID, [T + 1_000]).sessions[ID]!.pendingResume).toBe(false);
+  });
+});
+
+/**
+ * Findings from the adversarial audit of this feature, each reproduced before
+ * it was fixed. All three share one root: a session's stopping-cause fields
+ * outlive the stop they describe.
+ */
+describe('a spent limit must not shadow a live outage', () => {
+  it('does not make an outage instantly eligible, bypassing its backoff', () => {
+    // `limit` was never cleared once resumed. A session that hit a limit hours
+    // ago still carried it, so a later outage took the *limit* branch: eligible
+    // at once, backoff never consulted, retry cap never consulted.
+    const s = session({
+      supervisedFrom: T - 7_200_000, // the limit belongs to this run
+      pendingResume: true,
+      limit: { kind: 'session', detectedAt: T - 3_600_000, resetAt: T - 3_000_000, raw: 'spent' },
+      outage: outage({ detectedAt: T, retryAt: T + 300_000 }), // 5 minutes to go
+    });
+
+    const verdict = sessionResumableSync(s, config, T + 1_000);
+    expect(verdict.ok, verdict.reason).toBe(false);
+    expect(verdict.reason).toMatch(/to go|cap reached/);
+  });
+
+  it('is cleared once the session has been continued', () => {
+    // The narrower half of the fix: nothing should be able to consult a limit
+    // that has already been acted on.
+    const before = stateWith({
+      pendingResume: true,
+      limit: { kind: 'session', detectedAt: T, resetAt: T, raw: 'x' },
+    });
+    const after = absorbUserRecovery(before, ID, [T + 1_000]);
+    expect(after.sessions[ID]!.limit).toBeNull();
+  });
+});
+
+describe('an episode the user already ended must stay ended', () => {
+  it('a rescue arriving with the error still ends the episode', () => {
+    // The user typed `continue` themselves five seconds after the failure, so
+    // both records land in one poll. Absorption must happen before recovery is
+    // judged; the reverse order sees nothing pending, does nothing, and arms
+    // the episode anyway — a stray `continue` into a session already working.
+    //
+    // The ordering itself lives in `tick`, so it is asserted at that call site
+    // in `wiring.test.ts`; this pins the pieces it depends on.
+    let s = stateWith();
+    s = absorbOutage(s, ID, outage({ detectedAt: T }), config, T);
+    s = absorbUserRecovery(s, ID, [T + 5_000]);
+
+    expect(s.sessions[ID]!.pendingResume).toBe(false);
+    expect(s.sessions[ID]!.outage).toBeNull();
+  });
+});
+
+describe('an out-of-order record', () => {
+  it('does not replace a newer episode with an older one', () => {
+    // Reachable when a transcript is re-read from the start. Adopting the older
+    // record resets `attempts` and sets a `retryAt` already in the past — a
+    // retry loop assembled out of two correct-looking halves.
+    const before = stateWith({ outage: outage({ detectedAt: T + 60_000, attempts: 3 }), pendingResume: true });
+    const after = absorbOutage(before, ID, outage({ detectedAt: T }), config, T + 120_000);
+
+    expect(after.sessions[ID]!.outage!.attempts).toBe(3);
+    expect(after.sessions[ID]!.outage!.detectedAt).toBe(T + 60_000);
   });
 });
