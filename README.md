@@ -166,6 +166,52 @@ npm_config_build_from_source=true npm i -g claudekishmish
 `ckm doctor` tells you which mode you are in. It allocates a real PTY rather
 than loading the module, because on macOS loading proves nothing.
 
+## When the API stalls rather than refuses
+
+A usage limit is not the only thing that stops work mid-task. The API can be
+overloaded, a stream can stall, a socket can drop. Unlike a limit, none of these
+state a reset time — the session just stops and waits for a person.
+
+These are continued too, on an exponential backoff (30s, 1m, 2m, 4m, 8m by
+default), capped at five attempts. The taxonomy comes from what one real
+84,000-line transcript history actually contained:
+
+| Seen | `error` | Status | Treated as |
+|---|---|---|---|
+| 96 | `rate_limit` | 429 | a limit — it states when it lifts, so it is waited out |
+| 33 | `authentication_failed` | — | terminal; the tool halts rather than retrying |
+| 4 | `server_error` | — | **retryable** — "Response stalled mid-stream" |
+| 4 | `authentication_failed` | 403 | terminal |
+| 2 | `unknown` | — | **retryable** — "Unable to connect to API (ConnectionRefused)" |
+| 1 | `unknown` | 529 | **retryable** — "API Error: Overloaded" |
+| 1 | `oauth_org_not_allowed` | 403 | terminal |
+
+A 4xx is the request's fault and will fail again identically, so it is never
+retried. A bare `unknown` is a grab-bag: it is retried only when its text is a
+recognised transport failure.
+
+Detection is structural, never textual. Searching those same transcripts for
+`API Error: 529` returns conversations *about* error handling — including this
+project's own documentation. `isApiErrorMessage` is set by Claude Code on
+records it generated itself and cannot be produced by anything a person or a
+model wrote in a message.
+
+An outage never consumes a boundary, because the window is still running. A
+limit outranks an outage: retrying during a limit cannot succeed, and the limit
+knows exactly how long to wait.
+
+An adversarial audit of this feature found two ways it could still loop, both
+now fixed and pinned: a limit that had already been acted on was never cleared,
+and a stale one made every later outage eligible instantly — backoff and cap
+both skipped; and recovery was judged before the poll was absorbed, so a poll
+containing both the failure and your own reply armed a continuation anyway.
+
+The attempt count is deliberately an **episode**, not a record. Every failed
+continuation writes a new error record, so counting records would reset the
+counter each time and turn a cap of five into an unbounded retry loop against an
+API that is already failing. The count survives new records and clears only when
+your own next message appears.
+
 ## Three limits, three responses
 
 Claude Code has three separate caps, and treating them as one is what makes naive
@@ -223,7 +269,7 @@ ckm resume [--all]     # switch it back on; also clears a halt
 ckm claim on|off       # boundary claiming when nothing is pending
 ckm doctor             # check every dependency, by running them (no billable request)
 ckm logs [-n <count>]  # what it did while you were away
-ckm config get|set     # settings
+ckm config get|set     # settings (maxOutageRetries, outageBackoffMs, ...)
 ckm shim               # where the shim is, and how to put it on PATH
 ckm uninstall          # remove the shim and the service unit
 ```
@@ -284,11 +330,15 @@ more than the features.
    the instant before anything is typed.
 8. **Nothing leaves your machine.** No credentials are read, stored or
    transmitted. No network calls except Claude Code's own.
-9. **The ledger can be corrected.** What the tool believes about the current
+9. **An outage retry is bounded twice over.** Five attempts per episode, on a
+   capped backoff, and the count is cleared only by your own next message — so a
+   failing API is never hammered and a single bad afternoon cannot exhaust the
+   budget for the rest of the session.
+10. **The ledger can be corrected.** What the tool believes about the current
    window is re-derived from your conversation history every tick, so a wrong
    belief lasts one tick rather than for ever, and a correction is logged
    (`ledger.corrected`) with what it believed and what the evidence said.
-10. **Everything is logged** before it happens — `ckm logs`.
+11. **Everything is logged** before it happens — `ckm logs`.
 
 ## What it is not
 
@@ -335,7 +385,7 @@ land in the degraded mode.
 ```bash
 npm install
 npm run build
-npm test              # 308 tests
+npm test              # 367 tests
 npm run mutation-check   # reintroduce each fixed defect; every one must go red
 ```
 
@@ -346,7 +396,7 @@ loop runs in seconds with no account and no network.
 
 The suite is mutation-checked: each fixed defect is reintroduced and the test
 written for it must go red. A test that still passes with the bug back in is not
-a test. Forty-six mutations are checked this way, and several were added because
+a test. Sixty-four mutations are checked this way, and several were added because
 an audit proved the original tests could not see them — most often because a
 guard had unit tests and its **call site** had none.
 

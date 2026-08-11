@@ -68,6 +68,7 @@ function session(over: Partial<SupervisedSession> = {}): SupervisedSession {
     paused: false,
     pendingResume: true,
     resumeCount: 0,
+    outage: null,
     limit: {
       kind: 'session',
       detectedAt: now - 3600_000,
@@ -362,5 +363,325 @@ describe('the ledger is reconciled against history on every tick', () => {
     const after = readState().ledger;
     expect(after.currentEnd).toBe(truth.end);
     expect(after.source).toBe('computed');
+  });
+});
+
+/**
+ * The outage path, at its call site.
+ *
+ * `absorbOutage` and `outageResumable` are unit-tested. This proves `tick`
+ * actually reads outages out of a transcript and records them — the
+ * guard-with-no-caller shape that has now bitten this codebase ten times, most
+ * recently in the state lock two commits ago.
+ */
+describe('an API outage is picked up from the transcript', () => {
+  function writeOutageTranscript(at: number, text: string, error: string, status?: number): void {
+    const dir = path.join(claudeHome, 'projects', 'some-project');
+    fs.mkdirSync(dir, { recursive: true });
+    const rec: Record<string, unknown> = {
+      type: 'assistant',
+      error,
+      isApiErrorMessage: true,
+      timestamp: new Date(at).toISOString(),
+      message: { content: [{ type: 'text', text }] },
+    };
+    if (status !== undefined) rec.apiErrorStatus = status;
+    fs.writeFileSync(path.join(dir, `${SESSION_ID}.jsonl`), JSON.stringify(rec) + '\n', 'utf8');
+  }
+
+  it('records it, and schedules a retry rather than firing immediately', async () => {
+    clearTurnCache();
+    const now = Date.now();
+    writeOutageTranscript(now - 1_000, 'API Error: Overloaded', 'unknown', 529);
+
+    await mutateState(() => ({
+      ...emptyState(now),
+      sessions: { [SESSION_ID]: session({ limit: null, pendingResume: false }) },
+    }));
+
+    await tick({ actor: { id: 'd', ownSessionId: null }, resume: async () => false, config });
+
+    const after = readState().sessions[SESSION_ID]!;
+    expect(after.outage).not.toBeNull();
+    expect(after.outage!.status).toBe(529);
+    expect(after.pendingResume).toBe(true);
+    // Not yet: the backoff has to pass first.
+    expect(after.outage!.retryAt).toBeGreaterThan(now);
+    expect(after.outage!.attempts).toBe(0);
+  });
+
+  it('does not mistake an authentication failure for an outage', async () => {
+    // 33 of them in the real history. Retrying one is exactly what makes a
+    // background tool intolerable.
+    clearTurnCache();
+    const now = Date.now();
+    writeOutageTranscript(
+      now - 1_000,
+      'Failed to authenticate: OAuth session expired and could not be refreshed',
+      'authentication_failed',
+    );
+
+    await mutateState(() => ({
+      ...emptyState(now),
+      sessions: { [SESSION_ID]: session({ limit: null, pendingResume: false }) },
+    }));
+
+    await tick({ actor: { id: 'd', ownSessionId: null }, resume: async () => false, config });
+
+    expect(readState().sessions[SESSION_ID]!.outage).toBeNull();
+  });
+});
+
+/**
+ * The one place the outage attempt counter goes UP.
+ *
+ * Everything else tests that the count is *preserved* or *enforced*. Nothing
+ * tested that it ever increases — and the audit found a live path where it
+ * silently did not, which turns a cap of five into a retry loop at tick rate.
+ * This drives `tick` as the session's own owner, the only actor that can
+ * actually inject, because a daemon-actor test can never fire the resume and so
+ * proves nothing about what happens after one.
+ */
+describe('an outage continuation spends an attempt', () => {
+  it('increments the count and pushes the next retry further out', async () => {
+    clearTurnCache();
+    const now = Date.now();
+
+    await mutateState(() => ({
+      ...emptyState(now),
+      sessions: {
+        [SESSION_ID]: session({
+          limit: null,
+          pendingResume: true,
+          resumeCount: 0,
+          outage: {
+            detectedAt: now - 60_000,
+            status: 529,
+            error: 'unknown',
+            raw: 'API Error: Overloaded',
+            attempts: 1,
+            retryAt: now - 1_000, // due
+          },
+        }),
+      },
+    }));
+
+    let injected = 0;
+    await tick({
+      actor: { id: 'owner', ownSessionId: SESSION_ID },
+      resume: async () => {
+        injected++;
+        return true;
+      },
+      config,
+    });
+
+    expect(injected, 'the continuation should have been sent').toBe(1);
+
+    const after = readState().sessions[SESSION_ID]!;
+    expect(after.outage!.attempts).toBe(2);
+    expect(after.outage!.retryAt).toBeGreaterThan(now);
+    expect(after.resumeCount).toBe(1);
+  });
+
+  it('spends nothing when the continuation was declined', async () => {
+    // A draft in the box, a pause, a lost PTY — a guess we never made must not
+    // consume one of the few the cap allows.
+    clearTurnCache();
+    const now = Date.now();
+
+    await mutateState(() => ({
+      ...emptyState(now),
+      sessions: {
+        [SESSION_ID]: session({
+          limit: null,
+          pendingResume: true,
+          outage: {
+            detectedAt: now - 60_000,
+            status: 529,
+            error: 'unknown',
+            raw: 'API Error: Overloaded',
+            attempts: 1,
+            retryAt: now - 1_000,
+          },
+        }),
+      },
+    }));
+
+    await tick({
+      actor: { id: 'owner', ownSessionId: SESSION_ID },
+      resume: async () => false,
+      config,
+    });
+
+    const after = readState().sessions[SESSION_ID]!;
+    expect(after.outage!.attempts).toBe(1);
+    expect(after.pendingResume).toBe(true);
+  });
+});
+
+/**
+ * Order of absorption inside one poll.
+ *
+ * A ten-second poll routinely contains both the failure and the user's own
+ * rescue. Judging recovery before absorbing the failure sees nothing pending,
+ * does nothing, and arms the episode anyway — while the turn that proves the
+ * user carried on is consumed with the batch and never looked at again. The
+ * tool then types into a session that is already working.
+ */
+describe('a rescue in the same poll as the failure', () => {
+  // A distinct session id per case, deliberately. `readSince` keeps a
+  // per-session byte offset in module state, so two cases sharing an id would
+  // have the second start reading past the first one's records — and the test
+  // would then pass or fail on ordering rather than on behaviour.
+  function writeRecords(id: string, records: object[]): void {
+    const dir = path.join(claudeHome, 'projects', 'some-project');
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(
+      path.join(dir, `${id}.jsonl`),
+      records.map((r) => JSON.stringify(r)).join('\n') + '\n',
+      'utf8',
+    );
+  }
+
+  it('leaves nothing pending when the user already carried on', async () => {
+    clearTurnCache();
+    const now = Date.now();
+
+    const id = '90000000-0000-4000-8000-000000000001';
+    writeRecords(id, [
+      {
+        type: 'assistant',
+        error: 'unknown',
+        apiErrorStatus: 529,
+        isApiErrorMessage: true,
+        timestamp: new Date(now - 20_000).toISOString(),
+        message: { content: [{ type: 'text', text: 'API Error: Overloaded' }] },
+      },
+      {
+        type: 'user',
+        timestamp: new Date(now - 15_000).toISOString(),
+        message: { role: 'user', content: 'continue' },
+      },
+    ]);
+
+    await mutateState(() => ({
+      ...emptyState(now),
+      sessions: { [id]: session({ sessionId: id, limit: null, pendingResume: false }) },
+    }));
+
+    await tick({ actor: { id: 'd', ownSessionId: null }, resume: async () => false, config });
+
+    const after = readState().sessions[id]!;
+    expect(after.pendingResume, 'the user rescued it themselves').toBe(false);
+    expect(after.outage).toBeNull();
+  });
+
+  it('still arms when the failure is the last thing that happened', async () => {
+    // The other half: this must not become "never act on an outage".
+    clearTurnCache();
+    const now = Date.now();
+
+    const id = '90000000-0000-4000-8000-000000000002';
+    writeRecords(id, [
+      {
+        type: 'user',
+        timestamp: new Date(now - 30_000).toISOString(),
+        message: { role: 'user', content: 'do the thing' },
+      },
+      {
+        type: 'assistant',
+        error: 'unknown',
+        apiErrorStatus: 529,
+        isApiErrorMessage: true,
+        timestamp: new Date(now - 10_000).toISOString(),
+        message: { content: [{ type: 'text', text: 'API Error: Overloaded' }] },
+      },
+    ]);
+
+    await mutateState(() => ({
+      ...emptyState(now),
+      sessions: { [id]: session({ sessionId: id, limit: null, pendingResume: false }) },
+    }));
+
+    await tick({ actor: { id: 'd', ownSessionId: null }, resume: async () => false, config });
+
+    const after = readState().sessions[id]!;
+    expect(after.pendingResume).toBe(true);
+    expect(after.outage).not.toBeNull();
+  });
+});
+
+/**
+ * A cause that has been acted on is spent.
+ *
+ * `limit` used to be left on the session for ever. A stale one then shadowed
+ * every later outage — the limit branch found a reset from hours ago, declared
+ * the session eligible at once, and skipped the outage's backoff and retry cap
+ * while the attempt counter stayed frozen. That is a retry loop at tick rate,
+ * built out of a field nobody had cleared.
+ *
+ * `absorbUserRecovery` clears both causes too, and is tested separately. This
+ * covers the other place it has to happen: after we ourselves continued the
+ * session.
+ */
+describe('continuing a session clears the cause that stopped it', () => {
+  it('drops the limit once the continuation has landed', async () => {
+    clearTurnCache();
+    const now = Date.now();
+
+    await mutateState(() => ({
+      ...emptyState(now),
+      sessions: {
+        [SESSION_ID]: session({
+          pendingResume: true,
+          outage: null,
+          limit: {
+            kind: 'session',
+            detectedAt: now - 3_600_000,
+            resetAt: now - 60_000, // already lifted
+            raw: "You've hit your session limit",
+          },
+        }),
+      },
+    }));
+
+    await tick({
+      actor: { id: 'owner', ownSessionId: SESSION_ID },
+      resume: async () => true,
+      config,
+    });
+
+    const after = readState().sessions[SESSION_ID]!;
+    expect(after.resumeCount).toBe(1);
+    expect(after.limit, 'a spent limit must not outlive the continuation').toBeNull();
+  });
+
+  it('keeps the limit when the continuation was declined', async () => {
+    // Nothing happened, so nothing is spent — the session is still stopped by
+    // that limit and must still be seen that way.
+    clearTurnCache();
+    const now = Date.now();
+
+    await mutateState(() => ({
+      ...emptyState(now),
+      sessions: {
+        [SESSION_ID]: session({
+          pendingResume: true,
+          outage: null,
+          limit: { kind: 'session', detectedAt: now - 3_600_000, resetAt: now - 60_000, raw: 'limit' },
+        }),
+      },
+    }));
+
+    await tick({
+      actor: { id: 'owner', ownSessionId: SESSION_ID },
+      resume: async () => false,
+      config,
+    });
+
+    const after = readState().sessions[SESSION_ID]!;
+    expect(after.limit).not.toBeNull();
+    expect(after.pendingResume).toBe(true);
   });
 });

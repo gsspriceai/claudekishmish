@@ -44,6 +44,13 @@ authority — see `README.md`. The notable reversals:
   the present and outranks anything inferred, even when it moves the end
   earlier; one whose window has already ended is still ignored.
 
+- **"transient API errors are out of scope"** — reversed 2026-08-11. The design
+  treated only usage limits as interruptions worth continuing, on the grounds
+  that everything else is rare. It is not rare enough: a 529, a stalled stream
+  or a dropped socket stops the session exactly as a limit does, and states no
+  reset time, so the wait is a bounded backoff rather than a stated time. It
+  reuses the limit path so every safety guard applies unchanged.
+
 What has held up, and is worth reading for: the derivation of the window model
 in §2 from 90 real `rate_limit` records, and the reasoning in §2.3 about why
 continuing a session in place requires owning its PTY.

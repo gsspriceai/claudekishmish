@@ -41,6 +41,15 @@ export interface Config {
   maxResumesPerSession: number;
   /** Hard cap on idle claims in any rolling 7 days. */
   maxIdleClaimsPerWeek: number;
+  /**
+   * Hard cap on continuations sent for a single API outage. An outage states no
+   * reset time, so unlike a limit there is nothing to wait for — only a bounded
+   * number of guesses.
+   */
+  maxOutageRetries: number;
+  /** First outage backoff; doubles per attempt up to `outageBackoffCapMs`. */
+  outageBackoffMs: number;
+  outageBackoffCapMs: number;
 }
 
 export const DEFAULT_CONFIG: Config = {
@@ -53,6 +62,9 @@ export const DEFAULT_CONFIG: Config = {
   pollIntervalMs: 10_000,
   maxResumesPerSession: 3,
   maxIdleClaimsPerWeek: 14,
+  maxOutageRetries: 5,
+  outageBackoffMs: 30_000,
+  outageBackoffCapMs: 8 * 60_000,
 };
 
 /**
@@ -68,6 +80,10 @@ const BOUNDS: Partial<Record<keyof Config, { min: number; max: number }>> = {
   pollIntervalMs: { min: 1_000, max: 10 * 60_000 },
   maxResumesPerSession: { min: 0, max: 50 },
   maxIdleClaimsPerWeek: { min: 0, max: 100 },
+  maxOutageRetries: { min: 0, max: 20 },
+  // Never below 5s: a tighter loop would hammer an API that is already failing.
+  outageBackoffMs: { min: 5_000, max: 10 * 60_000 },
+  outageBackoffCapMs: { min: 5_000, max: 60 * 60_000 },
 };
 
 /**

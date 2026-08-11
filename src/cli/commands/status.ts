@@ -45,7 +45,14 @@ function daemonRunning(): number | null {
   }
 }
 
-export function runStatus(): number {
+/**
+ * Build the report.
+ *
+ * Separated from printing so it can be asserted on directly. A status command
+ * is the only window a user has into a background process, so what it says —
+ * and what it silently omits — is behaviour, not presentation.
+ */
+export function statusReport(): string[] {
   const config = loadConfig();
   const state = readState();
   const now = Date.now();
@@ -93,6 +100,14 @@ export function runStatus(): number {
     if (s.limit) {
       lines.push(`      limit   ${s.limit.kind} — resets ${clock(s.limit.resetAt)}`);
     }
+    // Shown whether or not it is currently blocking, because "waiting on an
+    // outage" and "waiting on a limit" look identical from outside and lead to
+    // completely different expectations about when work resumes.
+    if (s.outage) {
+      lines.push(
+        `      outage  ${s.outage.raw} — retry ${s.outage.attempts}/${config.maxOutageRetries}, next ${clock(s.outage.retryAt)}`,
+      );
+    }
     if (!eligibility.ok && s.pendingResume) {
       lines.push(`      blocked ${eligibility.reason}`);
     }
@@ -127,6 +142,10 @@ export function runStatus(): number {
   const decision = decideClaim(state, config, now, { id: ACTOR_ID, ownSessionId: null });
   lines.push(`  Next action    ${decision.action} — ${decision.reason}`);
 
-  process.stdout.write(lines.join('\n') + '\n');
+  return lines;
+}
+
+export function runStatus(): number {
+  process.stdout.write(statusReport().join('\n') + '\n');
   return 0;
 }

@@ -6,6 +6,8 @@
  * suspend would invalidate.
  */
 
+import type { OutageEvent } from '../claude/outage.js';
+
 /** Which of Claude Code's three limits we are looking at. */
 export type LimitKind = 'session' | 'weekly' | 'model';
 
@@ -60,6 +62,12 @@ export interface SupervisedSession {
   /** How many times we have auto-continued this session. Capped. */
   resumeCount: number;
   limit: LimitEvent | null;
+  /**
+   * An API failure that stopped the session and will pass on its own —
+   * overloaded, stalled, socket dropped. Unlike a limit it states no reset
+   * time, so it is retried on a bounded backoff instead of waited out.
+   */
+  outage: OutageEvent | null;
   /**
    * Consecutive liveness checks that failed. A session descriptor is rewritten
    * constantly by Claude Code, so a single unreadable read is normal and must
