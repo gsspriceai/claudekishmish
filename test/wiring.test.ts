@@ -12,6 +12,7 @@
 
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import fs from 'node:fs';
+import { rmWhenReleased } from './helpers/rm.js';
 import os from 'node:os';
 import path from 'node:path';
 import { DEFAULT_CONFIG, type Config } from '../src/config/index.js';
@@ -120,12 +121,14 @@ beforeEach(() => {
   writeDescriptor();
 });
 
-afterEach(() => {
+afterEach(async () => {
   for (const k of ['CKM_HOME', 'CLAUDE_CONFIG_DIR', 'FAKE_ARGS_FILE', 'FAKE_CWD_FILE', 'CKM_CLAUDE_BIN']) {
     delete process.env[k];
   }
-  fs.rmSync(ckmHome, { recursive: true, force: true });
-  fs.rmSync(claudeHome, { recursive: true, force: true });
+  // A claim spawns a real child process; on Windows its temp directory cannot
+  // be removed until it has actually gone. See `helpers/rm.ts`.
+  await rmWhenReleased(ckmHome);
+  await rmWhenReleased(claudeHome);
 });
 
 /** M2 — the halt had no end-to-end test at all. */

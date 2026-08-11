@@ -20,6 +20,7 @@ import { fileURLToPath } from 'node:url';
 import { mutateState, readState } from '../src/state/store.js';
 import type { State } from '../src/state/schema.js';
 import { PTY_AVAILABLE, PTY_SKIP_REASON } from './helpers/pty-available.js';
+import { rmWhenReleased } from './helpers/rm.js';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const repo = path.resolve(here, '..');
@@ -90,12 +91,14 @@ beforeEach(() => {
   );
 });
 
-afterEach(() => {
+afterEach(async () => {
   child?.kill();
   child = null;
   delete process.env.CKM_HOME;
-  fs.rmSync(ckmHome, { recursive: true, force: true });
-  fs.rmSync(claudeHome, { recursive: true, force: true });
+  // The wrapped child is not gone the instant kill() returns, and on Windows a
+  // directory it still holds cannot be removed. See `helpers/rm.ts`.
+  await rmWhenReleased(ckmHome);
+  await rmWhenReleased(claudeHome);
 });
 
 function startWrap(extraEnv: Record<string, string> = {}): ChildProcess {
