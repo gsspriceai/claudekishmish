@@ -48,8 +48,8 @@ const MUTATIONS = [
   {
     name: 'P1-5  the state lock does nothing',
     file: 'src/state/store.ts',
-    find: `      const handle = await fsp.open(stateLockPath(), 'wx');`,
-    replace: `      const handle = await fsp.open(stateLockPath(), 'w');`,
+    find: `const openLockExclusive: LockOpener = () => fsp.open(stateLockPath(), 'wx');`,
+    replace: `const openLockExclusive: LockOpener = () => fsp.open(stateLockPath(), 'w');`,
     expect: 'test/store.test.ts',
   },
   {
@@ -347,6 +347,20 @@ const MUTATIONS = [
     find: '    if (!seen.has(known)) cache.delete(known);',
     replace: '',
     expect: 'test/turn-cache.test.ts',
+  },
+  {
+    name: 'Windows delete-pending on the lock is fatal instead of contention',
+    file: 'src/state/store.ts',
+    find: "  return code === 'EEXIST' || code === 'EPERM' || code === 'EACCES';",
+    replace: "  return code === 'EEXIST';",
+    expect: 'test/store.test.ts',
+  },
+  {
+    name: 'the lock retry ignores the contention rule entirely',
+    file: 'src/state/store.ts',
+    find: '      if (!isLockContention(code)) throw err;',
+    replace: "      if (code !== 'EEXIST') throw err;",
+    expect: 'test/store.test.ts',
   },
   {
     name: 'a 24-hour reset string is unparseable (continuation never fires)',
