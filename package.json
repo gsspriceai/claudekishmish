@@ -1,6 +1,6 @@
 {
   "name": "claudekishmish",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Keep a Claude Code usage window always running, and continue interrupted work in the terminal it stopped in.",
   "type": "module",
   "engines": {
